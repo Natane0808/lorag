@@ -14,6 +14,25 @@ target
 # Contains mutation testing data
 **/mutants.out*/
 
+# ---> lorag 项目
+# 本地环境配置（含路径 / 端口），不要提交
+.env
+.env.smoke
+# 运行时数据（模型、LanceDB、SQLite）
+data/
+*.db
+*.db-*
+# aha 启动时可能产生的临时文件
+aha.log
+nohup.out
+# 开发过程中产生的临时日志（cargo build 输出、query 跑出来的截图等）
+*.log
+*.log.*
+# 测试 fixture（占空间 + 是临时数据；tests/*.rs 仍可提交）
+tests/fixtures/
+# Windows 保留设备名（dir nul 永远存在，加进去 git 就不报 untracked）
+nul
+
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
@@ -21,3 +40,8 @@ target
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
+
+
+# Added by cargo
+
+/target
