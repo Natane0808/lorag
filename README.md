@@ -15,8 +15,8 @@
 ## ✨ 特点 / Features
 
 - **完全本地**：模型、向量库、元数据全在你机器上，没任何外部服务
-- **零配置启动**：从 [aha](https://github.com/jhqxxx/aha) 自动识别 Qwen3 / MiniCPM4/5 / LFM2 等
-  主流本地模型
+- **零配置启动**：从 [aha](https://github.com/jhqxxx/aha) 自动识别支持的本地模型
+  （[aha 支持的模型列表](https://github.com/jhqxxx/aha/blob/main/docs/supported-models.zh-CN.md)）
 - **多格式摄入**：pdf / docx / pptx / xlsx / md / txt 6 种，sha256 幂等
 - **可观测**：每步 ingestion 打印进度；query 跑出 RAG 命中 / fallback
 - **GPU 加速可选**：默认 CPU 跑；要 NVIDIA GPU 加速加 `--features cuda` 一个开关
@@ -44,13 +44,19 @@ lorag ingest path/to/your/docs/
 lorag query "文档里讲了什么？"
 ```
 
-默认模型：
+默认模型（写在小机器上能跑的 0.6B 配置；想用更大模型自己改 `.env`）：
 - LLM：`Qwen/Qwen3-0.6B`（小，CPU 也能跑；想要更好回答换 `Qwen3-1.7B` / `4B`）
-- Embedding：`sentence-transformers/all-MiniLM-L6-v2`（384 维）
+- Embedding：`Qwen/Qwen3-Embedding-0.6B`（1024 维，质量比 MiniLM 显著好）
 
-换 4B 模型：`.env` 里改 `LLM_MODEL_REPO=Qwen/Qwen3-4B`，再 `lorag models pull`。
-**注意 EMBED_DIM 必须跟新模型匹配**（MiniLM=384，Qwen3-Embedding-0.6B=1024），改完要
-`rm -rf data/lancedb` 重建表。
+完整支持的模型列表见 [aha supported-models.zh-CN.md](https://github.com/jhqxxx/aha/blob/main/docs/supported-models.zh-CN.md)。
+
+**换 embedding 模型**（或任何会让 `EMBED_DIM` 变的改动）：
+1. 改 `.env` 里的 `EMBED_MODEL_REPO` 和 `EMBED_DIM`
+2. 跑 `lorag models pull`（下新模型）
+3. **`rm -rf data/lancedb data/lorag.db`**（**两个都要删**——lancedb 的向量维度硬编码在 schema；sqlite 的 `chunks` 表有 `UNIQUE(source_id, ordinal)` 约束，旧 chunks 不删重 ingest 会撞唯一索引）
+4. `lorag ingest <path>` 重新摄入
+
+只换 LLM（不改 embedding）不用清数据库——只更新 `LLM_MODEL_REPO` + `lorag models pull` 就行。
 
 ## 🛠️ 编译 / Build
 
@@ -113,7 +119,7 @@ lorag chat                   # M7 计划：真多轮对话（占位 stub）
           │ ingest (sha256 幂等)
           ▼
    ┌─────────────┐    ┌──────────────┐
-   │  chunker    │───▶│  aha embed   │  (all-MiniLM-L6-v2, 384-dim)
+   │  chunker    │───▶│  aha embed   │  (Qwen3-Embedding-0.6B, 1024-dim)
    └─────────────┘    └──────┬───────┘
                              │
                   ┌──────────┴──────────┐

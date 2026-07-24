@@ -182,7 +182,11 @@ fn run(cli: Cli) -> Result<()> {
                 ModelsAction::Status { r#init } => cmd_models_status(&cfg, r#init).await,
             },
             Command::Init { verbose } => cmd_init(&cfg, verbose).await,
-            Command::Shell { top_k, no_banner, no_rag } => cmd_shell(&cfg, top_k, no_banner, no_rag).await,
+            Command::Shell {
+                top_k,
+                no_banner,
+                no_rag,
+            } => cmd_shell(&cfg, top_k, no_banner, no_rag).await,
             Command::Sources { action } => match action {
                 SourcesAction::List { json } => cmd_sources_list(&cfg, json).await,
             },

@@ -28,9 +28,9 @@ use arrow_array::{Array, StringArray};
 use futures::StreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase};
 use rig::client::{CompletionClient, EmbeddingsClient};
+use rig::completion::CompletionModel;
 use rig::completion::message::{Message, Text, UserContent};
 use rig::completion::request::CompletionRequest;
-use rig::completion::CompletionModel;
 use rig::embeddings::EmbeddingModel;
 use rig::one_or_many::OneOrMany;
 
@@ -68,11 +68,7 @@ pub async fn rag_query(
 /// 裸 LLM 查询（直发 prompt，不检索 context）。
 ///
 /// `lorag shell --no-rag` 和 fallback 路径都用这个。
-pub async fn bare_llm_query(
-    client: &AhaClient,
-    cfg: &AppConfig,
-    question: &str,
-) -> Result<String> {
+pub async fn bare_llm_query(client: &AhaClient, cfg: &AppConfig, question: &str) -> Result<String> {
     let llm_model = client.completion_model(&cfg.llm_model_name);
     let req = CompletionRequest {
         preamble: Some("你是一个简洁的助手，用一两句话直接回答问题。".to_string()),
@@ -172,11 +168,10 @@ async fn try_rag_with_lancedb(
     .await
     .context("failed to connect to lancedb")?;
 
-    let table = db
-        .open_table("documents")
-        .execute()
-        .await
-        .context("failed to open `documents` table in lancedb (run `lorag ingest <path>` first)")?;
+    let table =
+        db.open_table("documents").execute().await.context(
+            "failed to open `documents` table in lancedb (run `lorag ingest <path>` first)",
+        )?;
 
     // ── 3. vector_search top_k（lancedb 原生 API）──
     let mut stream = table
@@ -188,14 +183,19 @@ async fn try_rag_with_lancedb(
 
     // ── 4. 收集 top_k chunks 的 text ──
     let mut chunks: Vec<String> = Vec::with_capacity(top_k);
-    while let Some(rb) = stream.next().await
+    while let Some(rb) = stream
+        .next()
+        .await
         .transpose()
         .context("failed to read lancedb search result")?
     {
         let text_col = rb
             .column_by_name("text")
             .ok_or_else(|| {
-                anyhow::anyhow!("lancedb schema missing `text` column (current schema: {:?})", rb.schema())
+                anyhow::anyhow!(
+                    "lancedb schema missing `text` column (current schema: {:?})",
+                    rb.schema()
+                )
             })?
             .as_any()
             .downcast_ref::<StringArray>()
