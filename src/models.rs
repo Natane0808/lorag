@@ -29,3 +29,14 @@ pub struct SourceRecord {
     /// 文件字节大小。
     pub byte_size: u64,
 }
+
+/// 一条 chat 历史消息（对应 SQLite `messages` 表的一行）。
+///
+/// 持久化在 sqlite，多轮 chat 时把同一 session 的最近 N 条塞回 LLM context。
+#[derive(Debug, Clone)]
+pub struct MessageRecord {
+    /// 角色：`"user"` | `"assistant"` | `"system"`。
+    pub role: String,
+    /// 消息文本。
+    pub content: String,
+}
