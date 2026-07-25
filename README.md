@@ -103,10 +103,13 @@ lorag ingest <PATH>...       # 摄入文件 / 目录（默认递归）
     --no-recursive           # 不递归子目录
 lorag query <QUESTION>       # 一次性 RAG 问答
     --top-k <N>              # 检索 top_k（默认 5）
-lorag shell                  # REPL：循环 query（init 一次不重 load）
-    --top-k <N>              # 覆盖 top_k
+lorag chat                   # 多轮对话 REPL（带 SQLite 历史 + RAG）
+    --message <TEXT>         # 一次性首问（不读 stdin）
+    --session <ID>           # 续接已有 session
+    --no-history             # 不带历史（每轮独立）
     --no-rag                 # 不检索，纯 LLM
     --no-banner              # 安静启动
+    --top-k <N>              # 覆盖 top_k
 lorag sources list           # 列出已摄入文件
     --json
 lorag reindex <PATH>...      # 清 LanceDB + SQLite 后重新摄入（换 EMBED_MODEL 后必须走这个）
@@ -183,8 +186,8 @@ lorag/
 - ✅ M0–M5：CLI / aha 加载 / 6 种 loader / chunker / SQLite / LanceDB / RAG 端到端
 - 🚧 M6：smoke test
 - ✅ `lorag doctor`：诊断命令（环境检查、模型完整性、lancedb 状态）
+- ✅ `lorag chat` 多轮对话 + SQLite 持久化历史（M7 done）
 - 🚧 README 完善 + 一键 release 脚本
-- 📋 M7：`lorag chat` 真多轮 + 持久化历史（届时 `lorag shell` 标 deprecated）
 - 📋 流式输出（aha 支持 SSE）
 - 📋 Web UI（axum）
 - 📋 混合检索（BM25 + 向量 RRF 融合）

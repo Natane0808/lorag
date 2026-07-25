@@ -14,8 +14,8 @@
 - **模型下载**：也走 aha **crate**（`aha::utils::download_model`），不调 aha CLI 二进制。
 - **MVP 不做**：多轮 chat REPL、流式、Web UI、混合检索、re-rank。
 - 跑通 MVP 的端到端命令：`lorag models pull && lorag ingest <path> && lorag query "..."`。
-- 当前已能跑：`lorag init`（load 模型）+ `lorag ingest`（6 种格式）+ `lorag query` / `lorag shell`（**RAG 端到端，绕开 dynamic_context 62GB 内存 bug**）。
-- **`lorag shell` 是临时方案** —— M7 实装真多轮后会被 `lorag chat` 替代（详见 PLAN.md §11.1）。M5 阶段 `shell` 是占位 REPL，`chat` 是 stub。
+- 当前已能跑：`lorag init`（load 模型）+ `lorag ingest`（6 种格式）+ `lorag query` / `lorag chat`（**RAG 端到端，绕开 dynamic_context 62GB 内存 bug**）。
+- M7 已实装：`lorag chat` 是唯一的多轮 REPL（带 SQLite 历史 + RAG + /reset + --session 续接 + --no-history 退化）。`lorag shell` 已在 M7.1 删除。
 
 读 `PLAN.md` 整个文件后再动代码。
 
@@ -107,7 +107,7 @@ config ──┬──→ aha_provider ─────┐    （aha lib 适配 +
 - **`config` 不依赖**任何业务模块；其他模块都依赖 `config`。
 - **`aha_provider` 是 aha ↔ rig 适配 + 模型生命周期的唯一入口**：
   - `AhaClient` 持有 `Option<Arc<Mutex<ModelInstance<'static>>>>`（LLM）+ `Arc<Mutex<ModelInstance<'static>>>`（embedding），LLM / embedding 各自独立锁
-  - `AhaClient::init(...)` 调 `aha::models::load_model` 同时 load LLM + embedding（被 `lorag init` / `lorag models status --init` / `lorag query` / `lorag shell` 调用）
+  - `AhaClient::init(...)` 调 `aha::models::load_model` 同时 load LLM + embedding（被 `lorag init` / `lorag models status --init` / `lorag query` / `lorag chat` 调用）
   - `AhaClient::init_embed_only(...)` 只 load embedding（被 `lorag ingest` 调用）—— 省 LLM 的 ~8GB 内存 + 数十秒 load
   - `AhaClient::has_llm()` 区分两种 client；`llm_generate` 在 `llm == None` 时报清晰错误（不返回空结果）
   - `ensure_model_downloaded(...)` 调 `aha::utils::download_model`（被 `lorag models pull` 调用）
@@ -121,9 +121,9 @@ config ──┬──→ aha_provider ─────┐    （aha lib 适配 +
 - **`rag` 模块是 M5 实装的关键**（**绕开 dynamic_context**）：
   - **不要**用 `AgentBuilder::dynamic_context` + `LanceDbVectorIndex` —— 5 chunks 也会爆 62GB 内存（实测，详见 PLAN.md §6.5.1）
   - `rag_query` 主流程：`embed_text` → `lancedb::connect().open_table("documents").vector_search(&[f32]).limit(k).execute()` → 流式读 `RecordBatch` + `StringArray::value(i)` 抽 text → 拼 context → `llm_model.completion(req)`
-  - `bare_llm_query`：直发 prompt，不检索（被 `lorag shell --no-rag` 和 fallback 用）
+  - `bare_llm_query`：直发 prompt，不检索（被 `lorag chat --no-rag` 和 fallback 用）
   - `is_recoverable_error`：lancedb 任何错误（不存在 / 没数据 / 内存不够）→ fallback 到 bare LLM，不让用户卡住
-  - 上层模块（cmd_query / cmd_shell）一律走 `rag_query` / `bare_llm_query`，不直接调 lancedb / rig
+  - 上层模块（cmd_query / cmd_chat）一律走 `rag_query` / `bare_llm_query`，不直接调 lancedb / rig
 - **`store::lancedb_store` 还管 IVF-HNSW 索引**：
   - `ensure_hnsw_index(table)` 在 `ingest_one` 写完 lancedb 之后调
   - lancedb 0.30 HNSW 走 IVF-HNSW-FLAT（`IvfHnswFlatIndexBuilder::default()`），用 `table.create_index(&["embedding"], Index::IvfHnswFlat(...))`

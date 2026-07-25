@@ -7,7 +7,7 @@
 > - M2 文档 loaders：✅ pdf / docx / pptx / xlsx / md / txt 6 种
 > - M3 摄入 pipeline：✅ chunker + lancedb_store + sqlite_store
 > - M4 rig 0.40 provider 适配：✅ `lorag query "1+1=?"` 拿到 `"1 + 1 = 2"`（via rig CompletionModel）
-> - M5 RAG 端到端：✅ **重写绕开 `dynamic_context` 的 62GB 内存 bug**；`lorag query` / `lorag shell` 都跑通
+> - M5 RAG 端到端：✅ **重写绕开 `dynamic_context` 的 62GB 内存 bug**；`lorag query` 跑通
 > - `lorag doctor`：✅ 诊断命令（env / models / storage / build features，11 项检查）
 > - `lorag reindex`：✅ M5.1 实装（清 LanceDB + SQLite 后重新摄入，用于换 EMBED_MODEL 后）
 > - 待办：M6 smoke test
@@ -194,7 +194,7 @@ lorag models pull
 ## 5. 目录结构（MVP）
 
 > **实装状态**：
-> - ✅ `src/main.rs`（CLI 骨架 + `init` / `query` / `shell` / `models` / `sources` / `reindex` / `chat` / `doctor` 命令）
+> - ✅ `src/main.rs`（CLI 骨架 + `init` / `query` / `models` / `sources` / `reindex` / `chat` / `doctor` 命令）
 > - ✅ `src/lib.rs`（模块声明）
 > - ✅ `src/config.rs`（dotenvy + `AppConfig` + validate）
 > - ✅ `src/aha_provider.rs`（path resolve + `AhaClient::init` + `llm_generate` / `embed_texts`）
@@ -215,7 +215,7 @@ lorag/
 ├── PLAN.md
 ├── AGENTS.md
 ├── src/
-│   ├── main.rs                     # ✅ CLI 入口（clap）：init / query / shell / models / sources / reindex / chat / doctor
+│   ├── main.rs                     # ✅ CLI 入口（clap）：init / query / models / sources / reindex / chat / doctor
 │   ├── lib.rs                      # ✅ 模块声明（pub mod aha_provider / config / rig_compat / rag）
 │   ├── config.rs                   # ✅ AppConfig：LLM_MODEL / EMBED_MODEL / MODELS_DIR / ...
 │   ├── aha_provider.rs             # ✅ AhaClient + ensure_model_downloaded + models_status + resolve_model_path
@@ -523,10 +523,10 @@ llm_model.completion(CompletionRequest { preamble, chat_history: OneOrMany::one(
 
 `is_recoverable_error` 匹配关键字：`lancedb` / `Lance` / `documents table` / `run lorag ingest` / `memory allocation` / `No such file`。
 
-#### 6.5.4 `lorag shell --no-rag` flag
+#### 6.5.4 `lorag chat --no-rag` flag
 
-`cmd_shell` 多了一个 `--no-rag` flag：直接走 `bare_llm_query`，完全不碰 lancedb。用途：
-- 跑通后想快速对话、不想 load LanceDB（5s 启动 vs 5s+）
+`cmd_chat` 多了一个 `--no-rag` flag：直接走 LLM，完全不碰 lancedb。用途：
+- 跑通后想快速对话、不想 load LanceDB
 - 没摄入文档时测试 LLM 本身
 
 #### 6.5.5 关键实现细节
@@ -672,7 +672,13 @@ lorag reindex <PATH>...          # ✅ M5.1 实装：清 LanceDB + SQLite 后重
                                  #   适用：换 EMBED_MODEL 后清数据；想完全重建
                                  #   不删模型文件（MODELS_DIR/）—— 模型仍走 `models pull`
 
-lorag chat                       # ⏳ M7 计划：多轮对话 REPL（MVP 占位，打印"not implemented in MVP")
+lorag chat                       # ✅ M7 实装：多轮对话 REPL（带 SQLite 历史 + RAG + /reset /session 续接）
+    --message <TEXT>      # 一次性首问（不读 stdin）
+    --session <ID>        # 续接已有 session
+    --no-history          # 不带历史（每轮独立）
+    --no-rag              # 跳过 LanceDB 检索（纯 LLM）
+    --no-banner           # 安静启动
+    --top-k <N>           # 检索 top_k
 ```
 
 > 全部命令均带 `--help`，错误信息用 `anyhow` 打印，exit code 1。
@@ -803,7 +809,7 @@ incremental = true
 > - 改走手写：`embed_text` → `table.vector_search(&[f32])?.limit(k).execute()` → `RecordBatch` 流式读 → `StringArray::value(i)` 抽 text → 拼 context → `llm_model.completion(req)`
 > - 5 chunks 实测 `iops=2 requests=2 bytes_read=20992`，无 allocation 爆炸
 > - 加 `is_recoverable_error` fallback：lancedb 出错时自动转裸 LLM
-> - `lorag shell --no-rag` flag：不走 lancedb，纯 LLM（应急 / 快速对话用）
+> - `lorag chat --no-rag` flag：不走 lancedb，纯 LLM（应急 / 快速对话用）
 > - arrow-array 58 的 `StringArray::value(i)` 返回 `&str`（**不是** `Option<&str>`，是早期版本 API）
 > **M4 关键经验**（给未来接手的 agent）：
 > - rig 0.40 跟 0.39 API 差异大；用 0.40 写的代码升级到 0.41+ 时**必须重看** `client/completion.rs` + `client/embeddings.rs` + `completion/request.rs`
@@ -831,28 +837,9 @@ incremental = true
 
 ## 11. 后续迭代（占位）
 
-### 11.1 `shell` → `chat` 演进路线
+### 11.1 其他待办
 
-**当前状态**（M5）：
-- `lorag shell` ✅ 已实装：init 一次后循环 query，每条独立（不带历史）
-- `lorag chat` 🚧 占位 stub（`bail!("placeholder in MVP")`），M7 计划实装多轮
-
-**为什么两个并存**：M5 需要可用的 REPL 让用户试 RAG，但真多轮还没做。先 `shell` 解 M5 的燃眉之急。
-
-**M7 目标**：
-- `lorag chat` 实装：多轮 + RAG（默认）/ 裸 LLM（`--no-rag`）+ 命令 `/help` `/status` `/clear` `/reset` `/exit` + SQLite 持久化历史
-- `lorag shell` 标 `#[deprecated]`，实现改成 `re-exec → lorag chat --no-history`（保兼容，老用户的脚本不挂）
-- 提示用户迁移：`shell` 命令首次跑时打 warning，建议 `chat`
-
-**M7+1 目标**：
-- `lorag shell` 完全删掉
-- 文档只讲 `chat`（`--no-history` 是它的 flag，不是另一个命令）
-
-**理由**：`shell` 和 `chat` 唯一差异是"有没有历史"。这个差异就是 `chat` 上的一个开关。两个命令做同一件事，徒增 CLI 表面。
-
-### 11.2 其他待办
-
-- `lorag chat` 多轮 REPL + SQLite 持久化历史（M7，见 §11.1）
+- `lorag chat` ✅ M7 已实装（`src/main.rs::cmd_chat`）：多轮 + SQLite 持久化历史 + RAG fallback
 - `lorag reindex` ✅ M5.1 已实装（`src/main.rs::cmd_reindex`）：删 lancedb + sqlite 后重新 ingest。自动检测 embed_model 变化（MVP 不做，太重；用户手动跑 reindex 即可）。
 - 流式输出（aha 支持 SSE）
 - Web UI（axum）
