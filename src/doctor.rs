@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::aha_provider::models_status;
+use crate::aha_provider::{models_status, read_hidden_size_from_config, resolve_model_path};
 use crate::config::AppConfig;
 
 /// 检查状态。
@@ -270,6 +270,41 @@ fn check_models(checks: &mut Vec<Check>, cfg: &AppConfig) {
                 format!("not found locally (expected at {})", status.expected_path.display()),
                 "run `lorag models pull` to download",
             ));
+        }
+    }
+
+    // 额外检查 embedding 模型：如果存在就读 config.json 拿 hidden_size，跟 EMBED_DIM 对一下
+    // 跟 AhaClient::init 一样的检查，doctor 提前告诉用户避免启动时才发现
+    if let Some(embed_path) = resolve_model_path(&cfg.embed_model_repo, &cfg.models_dir) {
+        match read_hidden_size_from_config(&embed_path) {
+            Some(actual) if actual != cfg.embed_dim => {
+                checks.push(Check::fail(
+                    "models",
+                    "EMBED_DIM ↔ embedding model",
+                    format!(
+                        ".env EMBED_DIM={} but `{}` outputs {}-dim vectors",
+                        cfg.embed_dim, cfg.embed_model_repo, actual
+                    ),
+                    format!(
+                        "set EMBED_DIM={} in .env (or change EMBED_MODEL_REPO), then \
+                         rm -rf data/lancedb data/lorag.db && lorag ingest <path>",
+                        actual
+                    ),
+                ));
+            }
+            Some(actual) => {
+                checks.push(Check::pass(
+                    "models",
+                    "EMBED_DIM ↔ embedding model",
+                    format!(
+                        "EMBED_DIM={} matches `{}` hidden_size",
+                        actual, cfg.embed_model_repo
+                    ),
+                ));
+            }
+            None => {
+                // 读不到 config.json（可能是非 HF 格式），silently skip
+            }
         }
     }
 }

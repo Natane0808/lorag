@@ -84,6 +84,45 @@ pub fn resolve_model_path(repo: &str, save_dir: &Path) -> Option<PathBuf> {
     candidates.into_iter().find(|p| dir_has_model(p))
 }
 
+/// 从模型目录的 `config.json` 读 `hidden_size` 字段。
+///
+/// 用于在 `AhaClient::init` 时校验 `.env` 的 `EMBED_DIM` 跟模型实际输出维度是否一致。
+/// 大多数 HuggingFace embedding 模型（包括 Qwen3-Embedding / MiniLM）都用 `hidden_size`
+/// 表示 embedding 维度。读不到就返回 `None`（不阻止启动，只是不做这个检查）。
+pub fn read_hidden_size_from_config(model_path: &Path) -> Option<usize> {
+    let config_path = model_path.join("config.json");
+    let bytes = std::fs::read(&config_path).ok()?;
+    let json: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    // HF transformers 标准字段。某些老模型（BERT 时代）用 `hidden_size` 也行；
+    // 如果以后碰不到就 fallback 到 dummy embed（先不做）。
+    json.get("hidden_size")?.as_u64().map(|n| n as usize)
+}
+
+/// 校验 `.env` 的 `EMBED_DIM` 跟 embedding 模型实际 `hidden_size` 是否一致。
+///
+/// 不一致就 bail，错误信息列出两个选项 + 提示清数据重建（lancedb schema 维度硬编码）。
+/// `read_hidden_size_from_config` 返回 `None`（读不到 config.json）时 silently skip，
+/// 不阻止启动（用户可能用的是非 HF 格式模型）。
+fn check_embed_dim(cfg: &AppConfig, embed_path: &Path) -> Result<()> {
+    if let Some(actual) = read_hidden_size_from_config(embed_path)
+        && actual != cfg.embed_dim
+    {
+        anyhow::bail!(
+            "config: EMBED_DIM={} in .env but `{}` actually outputs {}-dim vectors. \
+             Fix one of:\n  \
+             - set EMBED_DIM={} in .env to match the model, OR\n  \
+             - set EMBED_MODEL_REPO in .env to a model that outputs {}-dim vectors,\n\
+             then wipe the old index: rm -rf data/lancedb data/lorag.db && lorag ingest <path>",
+            cfg.embed_dim,
+            cfg.embed_model_repo,
+            actual,
+            actual,
+            cfg.embed_dim,
+        );
+    }
+    Ok(())
+}
+
 // =============================================================================
 // 模型下载（aha crate 直调，不走 CLI）
 // =============================================================================
@@ -290,6 +329,10 @@ impl AhaClient {
                 )
             })?;
 
+        // 1.5. 校验 .env 的 EMBED_DIM 跟模型实际 hidden_size 是否一致
+        // （lancedb schema 维度硬编码，错了会等到 embed 时才炸；这里提前拦）
+        check_embed_dim(&cfg, &embed_path)?;
+
         // 2. load_model 接受 &str，且需要 'static（用于 leak 成 &'static str 喂给 candle mmap）
         let llm_path_str = leak_path_str(&llm_path);
         let embed_path_str = leak_path_str(&embed_path);
@@ -367,6 +410,9 @@ impl AhaClient {
                     cfg.embed_model_repo
                 )
             })?;
+
+        // 1.5. 校验 .env 的 EMBED_DIM 跟模型实际 hidden_size 是否一致
+        check_embed_dim(&cfg, &embed_path)?;
 
         // 2. leak path 成 &'static str
         let embed_path_str = leak_path_str(&embed_path);
