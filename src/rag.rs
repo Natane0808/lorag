@@ -36,6 +36,160 @@ use rig::one_or_many::OneOrMany;
 
 use crate::aha_provider::AhaClient;
 use crate::config::AppConfig;
+use crate::models::MessageRecord;
+
+/// **M7 chat**：多轮对话时把【历史对话】 + 【文档上下文】拼成 LLM preamble。
+///
+/// - `history` 按 ordinal 升序（早→晚），assistant 视角读起来是"先发生的在前面"
+/// - `chunks` 来自 `retrieve_chunks`；为空时说明走 `--no-rag` 或 RAG 失败
+///
+/// 拼装规则：
+/// 1. 系统级 preamble 固定："你是简洁的本地 RAG 助手"
+/// 2. 有 history → 加【历史对话】段
+/// 3. 有 chunks → 加【文档上下文】段 + "上下文无法覆盖请直说" 提示
+pub fn build_chat_preamble(history: &[MessageRecord], chunks: &[String]) -> String {
+    let mut s = String::new();
+    s.push_str("你是一个简洁的本地 RAG 助手。\n");
+    s.push_str("回答要短（一两句话优先），不要重复问题，不要编造。\n");
+
+    if !history.is_empty() {
+        s.push_str("\n【历史对话】\n");
+        for msg in history {
+            let role_zh = match msg.role.as_str() {
+                "user" => "用户",
+                "assistant" => "助手",
+                "system" => "系统",
+                other => other,
+            };
+            s.push_str(&format!("{role_zh}：{}\n", msg.content));
+        }
+    }
+
+    if !chunks.is_empty() {
+        s.push_str("\n【文档上下文】\n");
+        for (i, c) in chunks.iter().enumerate() {
+            s.push_str(&format!("[{}] {}\n\n", i + 1, c));
+        }
+        s.push_str("仅根据上面的【文档上下文】回答【当前问题】；\n");
+        s.push_str("如果上下文无法覆盖，请直接说\"未在文档中找到相关信息\"，不要编造。\n");
+    }
+
+    s
+}
+
+/// **低层**：把 `preamble` + `question` 喂给 LLM，抽第一个 text 段返回。
+///
+/// `rag_query` / `bare_llm_query` / `cmd_chat` 都走这个统一入口。
+pub async fn llm_complete(
+    client: &AhaClient,
+    cfg: &AppConfig,
+    preamble: String,
+    question: &str,
+) -> Result<String> {
+    let llm_model = client.completion_model(&cfg.llm_model);
+    let req = CompletionRequest {
+        preamble: Some(preamble),
+        chat_history: OneOrMany::one(Message::user(question)),
+        temperature: Some(0.1),
+        ..empty_completion_request()
+    };
+    let resp = llm_model
+        .completion(req)
+        .await
+        .map_err(|e| anyhow::anyhow!("LLM completion failed: {e}"))?;
+    extract_text_from_response(&resp)
+}
+
+/// **低层**：embed question + lancedb vector_search top_k + 收集 chunks 文本。
+///
+/// 不调 LLM；不拼 context。RAG 失败时返回 `Err`，调用方决定要不要 fallback 到裸 LLM。
+pub async fn retrieve_chunks(
+    client: &AhaClient,
+    cfg: &AppConfig,
+    question: &str,
+    top_k: usize,
+) -> Result<Vec<String>> {
+    // ── 1. embed question ──
+    let embed_model = client.embedding_model(&cfg.embed_model);
+    let question_embedding = embed_model
+        .embed_text(question)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to embed question: {e}"))?;
+    let question_f32: Vec<f32> = question_embedding.vec.iter().map(|f| *f as f32).collect();
+    if let Some(expected) = client.embed_dim()
+        && question_f32.len() != expected
+    {
+        anyhow::bail!(
+            "question embedding dim {} != model dim {} (aha / candle 异常，模型可能加载坏了)",
+            question_f32.len(),
+            expected
+        );
+    }
+
+    // ── 2. 打开 lancedb ──
+    let lancedb_dir = Path::new(&cfg.lancedb_dir);
+    if !lancedb_dir.exists() {
+        anyhow::bail!(
+            "lancedb directory not found at {} (run `lorag ingest <path>` first)",
+            lancedb_dir.display()
+        );
+    }
+    let db = lancedb::connect(
+        lancedb_dir
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("lancedb path not UTF-8: {}", lancedb_dir.display()))?,
+    )
+    .execute()
+    .await
+    .context("failed to connect to lancedb")?;
+
+    let table =
+        db.open_table("documents").execute().await.context(
+            "failed to open `documents` table in lancedb (run `lorag ingest <path>` first)",
+        )?;
+
+    // ── 3. vector_search top_k ──
+    let mut stream = table
+        .vector_search(&question_f32[..])?
+        .limit(top_k)
+        .execute()
+        .await
+        .context("lancedb vector_search failed")?;
+
+    // ── 4. 收集 chunks ──
+    let mut chunks: Vec<String> = Vec::with_capacity(top_k);
+    while let Some(rb) = stream
+        .next()
+        .await
+        .transpose()
+        .context("failed to read lancedb search result")?
+    {
+        let text_col = rb
+            .column_by_name("text")
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "lancedb schema missing `text` column (current schema: {:?})",
+                    rb.schema()
+                )
+            })?
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| anyhow::anyhow!("`text` column is not StringArray"))?;
+        for i in 0..rb.num_rows() {
+            let text = text_col.value(i);
+            if !text.is_empty() {
+                chunks.push(text.to_string());
+            }
+        }
+    }
+    if chunks.is_empty() {
+        anyhow::bail!(
+            "lancedb returned no chunks for the query (ingest more documents or rephrase)"
+        );
+    }
+
+    Ok(chunks)
+}
 
 /// RAG 查询主流程。
 ///
@@ -69,17 +223,10 @@ pub async fn rag_query(
 ///
 /// `lorag shell --no-rag` 和 fallback 路径都用这个。
 pub async fn bare_llm_query(client: &AhaClient, cfg: &AppConfig, question: &str) -> Result<String> {
-    let llm_model = client.completion_model(&cfg.llm_model);
-    let req = CompletionRequest {
-        preamble: Some("你是一个简洁的助手，用一两句话直接回答问题。".to_string()),
-        chat_history: OneOrMany::one(Message::user(question)),
-        ..empty_completion_request()
-    };
-    let resp = llm_model
-        .completion(req)
+    let preamble = "你是一个简洁的助手，用一两句话直接回答问题。".to_string();
+    llm_complete(client, cfg, preamble, question)
         .await
-        .map_err(|e| anyhow::anyhow!("bare LLM completion failed: {e}"))?;
-    extract_text_from_response(&resp)
+        .map_err(|e| anyhow::anyhow!("bare LLM completion failed: {e}"))
 }
 
 /// rig `CompletionRequest` 没派生 Default —— 写个 helper 避免重复 boilerplate
@@ -130,122 +277,35 @@ fn extract_text_from_response(
 /// **手写** embed → lancedb vector_search → 拼 context → LLM。
 /// 不依赖 `LanceDbVectorIndex` 或 `dynamic_context` —— 这两层抽象在当前 rig/lancedb
 /// 集成里有隐藏的 ~62GB 内存分配 bug（实测过）。
+///
+/// 内部走 `retrieve_chunks` + `llm_complete` 两个低层。
 async fn try_rag_with_lancedb(
     client: &AhaClient,
     cfg: &AppConfig,
     question: &str,
     top_k: usize,
 ) -> Result<String> {
-    // ── 1. embed question（rig Embedding.vec 是 Vec<f64>）──
-    let embed_model = client.embedding_model(&cfg.embed_model);
-    let question_embedding = embed_model
-        .embed_text(question)
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to embed question: {e}"))?;
-    let question_f32: Vec<f32> = question_embedding.vec.iter().map(|f| *f as f32).collect();
-    // 防御：模型实际返回的 dim 跟 AhaClient 存的 dim 不一致 = aha 出 bug 了
-    if let Some(expected) = client.embed_dim()
-        && question_f32.len() != expected
-    {
-        anyhow::bail!(
-            "question embedding dim {} != model dim {} (aha / candle 异常，模型可能加载坏了)",
-            question_f32.len(),
-            expected
-        );
-    }
-
-    // ── 2. 打开 lancedb ──
-    let lancedb_dir = Path::new(&cfg.lancedb_dir);
-    if !lancedb_dir.exists() {
-        anyhow::bail!(
-            "lancedb directory not found at {} (run `lorag ingest <path>` first)",
-            lancedb_dir.display()
-        );
-    }
-    let db = lancedb::connect(
-        lancedb_dir
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("lancedb path not UTF-8: {}", lancedb_dir.display()))?,
-    )
-    .execute()
-    .await
-    .context("failed to connect to lancedb")?;
-
-    let table =
-        db.open_table("documents").execute().await.context(
-            "failed to open `documents` table in lancedb (run `lorag ingest <path>` first)",
-        )?;
-
-    // ── 3. vector_search top_k（lancedb 原生 API）──
-    let mut stream = table
-        .vector_search(&question_f32[..])?
-        .limit(top_k)
-        .execute()
-        .await
-        .context("lancedb vector_search failed")?;
-
-    // ── 4. 收集 top_k chunks 的 text ──
-    let mut chunks: Vec<String> = Vec::with_capacity(top_k);
-    while let Some(rb) = stream
-        .next()
-        .await
-        .transpose()
-        .context("failed to read lancedb search result")?
-    {
-        let text_col = rb
-            .column_by_name("text")
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "lancedb schema missing `text` column (current schema: {:?})",
-                    rb.schema()
-                )
-            })?
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or_else(|| anyhow::anyhow!("`text` column is not StringArray"))?;
-        for i in 0..rb.num_rows() {
-            let text = text_col.value(i);
-            if !text.is_empty() {
-                chunks.push(text.to_string());
-            }
-        }
-    }
-    if chunks.is_empty() {
-        anyhow::bail!(
-            "lancedb returned no chunks for the query (ingest more documents or rephrase)"
-        );
-    }
-
-    // ── 5. 拼 context，喂 LLM ──
+    let chunks = retrieve_chunks(client, cfg, question, top_k).await?;
     let context = chunks
         .iter()
         .enumerate()
         .map(|(i, t)| format!("[{}] {}", i + 1, t))
         .collect::<Vec<_>>()
         .join("\n\n");
-
-    let llm_model = client.completion_model(&cfg.llm_model);
     let preamble = format!(
         "你是一个本地 RAG 助手，仅根据下面的【上下文】回答问题。\n\
          如果上下文无法覆盖问题，请直接说\"未在文档中找到相关信息\"，不要编造。\n\n\
          【上下文】\n{context}"
     );
-    let req = CompletionRequest {
-        preamble: Some(preamble),
-        chat_history: OneOrMany::one(Message::user(question)),
-        temperature: Some(0.1),
-        ..empty_completion_request()
-    };
-    let resp = llm_model
-        .completion(req)
-        .await
-        .map_err(|e| anyhow::anyhow!("LLM completion failed: {e}"))?;
-    extract_text_from_response(&resp)
+    llm_complete(client, cfg, preamble, question).await
 }
 
 /// 判断 error 是不是"可恢复的"（lancedb 没数据 / 内存不够 / lance 出错）——
-/// 这种情况下 fallback 跑裸 LLM，不让用户卡住
-fn is_recoverable_error(err: &str) -> bool {
+/// 这种情况下 fallback 跑裸 LLM，不让用户卡住。
+///
+/// `pub` 是因为 `cmd_chat` 也要用（M7 多轮走 `retrieve_chunks` 低层，失败时
+/// 不能 fallback 到 `rag_query` 因为那不带 history，要自己处理）。
+pub fn is_recoverable_error(err: &str) -> bool {
     err.contains("lancedb")
         || err.contains("documents table")
         || err.contains("run `lorag ingest`")

@@ -6,11 +6,28 @@
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use lorag::aha_provider;
 use lorag::config;
+
+/// M7 chat: 每轮拼回 LLM context 的历史消息条数上限。
+///
+/// 20 条 ≈ 10 轮 user/assistant 交替。Qwen3-4B context window 32K，20 条平均
+/// 每条 200 字 → 约 4K tokens，留足 RAG context + 当前问题的空间。
+const MAX_HISTORY_MESSAGES: usize = 20;
+
+/// 生成一个 chat session id（`chat-YYYYMMDDTHHMMSS-<n>`）。
+///
+/// 进程内自增 counter 作后缀，**单进程内唯一**。多进程不冲突靠时间戳分辨率。
+fn generate_session_id() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let now = chrono::Utc::now().format("%Y%m%dT%H%M%S");
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("chat-{now}-{n}")
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -76,33 +93,37 @@ enum Command {
         verbose: bool,
     },
 
-    /// 交互式 REPL：init 一次后循环 query（避免每次 query 都重 load 模型）
-    Shell {
-        /// RAG 检索 top_k（覆盖配置）
-        #[arg(long)]
-        top_k: Option<usize>,
-
-        /// 不显示欢迎 banner
-        #[arg(long)]
-        no_banner: bool,
-
-        /// 跳过 LanceDB 检索（纯 LLM 对话）—— 用于绕开 rig-lancedb 的内存 bug，
-        /// 或在没 ingest 时也想对话
-        #[arg(long)]
-        no_rag: bool,
-    },
-
     /// 列出已摄入文件
     Sources {
         #[command(subcommand)]
         action: SourcesAction,
     },
 
-    /// 多轮对话 REPL（MVP 阶段占位）
+    /// 多轮对话 REPL（M7 实装：带历史 + RAG + SQLite 持久化）
     Chat {
-        /// 第一轮的问题（MVP 阶段不读 stdin）
+        /// 第一轮的问题（非交互式跑一次就退）
         #[arg(long, short)]
         message: Option<String>,
+
+        /// 续接已有 session（id 来自 /status 显示）
+        #[arg(long)]
+        session: Option<String>,
+
+        /// 不带历史（每轮独立）
+        #[arg(long)]
+        no_history: bool,
+
+        /// 不显示欢迎 banner
+        #[arg(long)]
+        no_banner: bool,
+
+        /// 跳过 LanceDB 检索（纯 LLM 对话）
+        #[arg(long)]
+        no_rag: bool,
+
+        /// 检索 top_k
+        #[arg(long)]
+        top_k: Option<usize>,
     },
 
     /// 诊断环境：检查 .env / 模型文件 / 存储路径 / 编译 feature
@@ -215,15 +236,17 @@ fn run(cli: Cli) -> Result<()> {
                 ModelsAction::Status { r#init } => cmd_models_status(&cfg, r#init).await,
             },
             Command::Init { verbose } => cmd_init(&cfg, verbose).await,
-            Command::Shell {
-                top_k,
-                no_banner,
-                no_rag,
-            } => cmd_shell(&cfg, top_k, no_banner, no_rag).await,
             Command::Sources { action } => match action {
                 SourcesAction::List { json } => cmd_sources_list(&cfg, json).await,
             },
-            Command::Chat { message } => cmd_chat(message).await,
+            Command::Chat {
+                message,
+                session,
+                no_history,
+                no_banner,
+                no_rag,
+                top_k,
+            } => cmd_chat(&cfg, message, session, no_history, no_banner, no_rag, top_k).await,
             Command::Doctor => cmd_doctor(&cfg),
             Command::Reindex {
                 paths,
@@ -342,165 +365,6 @@ async fn cmd_init(cfg: &config::AppConfig, _verbose: bool) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_shell(
-    cfg: &config::AppConfig,
-    top_k: Option<usize>,
-    no_banner: bool,
-    no_rag: bool,
-) -> Result<()> {
-    use lorag::aha_provider::AhaClient;
-    use lorag::rag;
-
-    let k = top_k.unwrap_or(cfg.top_k);
-
-    if !no_banner {
-        println!("lorag shell v{} (REPL mode)", env!("CARGO_PKG_VERSION"));
-        if no_rag {
-            println!("(RAG disabled via --no-rag — pure LLM mode)");
-        }
-        println!();
-    }
-
-    println!("loading models (10s~minutes first time, seconds after)...");
-    let _ = std::io::Write::flush(&mut std::io::stdout());
-    let client = AhaClient::init(cfg.clone())
-        .await
-        .context("failed to init AhaClient — try `lorag models status` first")?;
-    let _ = std::io::Write::flush(&mut std::io::stdout());
-
-    println!();
-    println!("ready:");
-    println!("  LLM       : {}", cfg.llm_model);
-    println!("  Embedding : {}", cfg.embed_model);
-    if no_rag {
-        println!("  RAG       : disabled (--no-rag)");
-    } else {
-        println!(
-            "  LanceDB   : {} (run `lorag ingest <path>` to add documents)",
-            cfg.lancedb_dir.display()
-        );
-        println!("  Top-K     : {k}");
-    }
-    println!();
-    println!("Type a question, or /help for commands. /exit to quit.");
-    println!();
-
-    let stdin = std::io::stdin();
-    let mut stdout = std::io::stdout();
-    let mut input = String::new();
-
-    loop {
-        print!(">> ");
-        let _ = stdout.flush();
-
-        input.clear();
-        match stdin.read_line(&mut input) {
-            Ok(0) => {
-                println!();
-                break;
-            }
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!("read error: {e}");
-                break;
-            }
-        }
-
-        let line = input.trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        // 内部命令（以 / 开头）
-        if let Some(cmd) = line.strip_prefix('/') {
-            let cmd = cmd.split_whitespace().next().unwrap_or("");
-            match cmd {
-                "exit" | "quit" | "q" => {
-                    println!("bye.");
-                    break;
-                }
-                "help" | "h" | "?" => {
-                    print_shell_help();
-                }
-                "status" => {
-                    print_shell_status(cfg, k, no_rag);
-                }
-                "clear" | "cls" => {
-                    for _ in 0..50 {
-                        println!();
-                    }
-                }
-                other => {
-                    eprintln!("unknown command: /{other} (try /help)");
-                }
-            }
-            continue;
-        }
-
-        // 普通问题 → RAG query（--no-rag 时跳过 lancedb 走裸 LLM）
-        print!("(thinking... ");
-        let _ = stdout.flush();
-        let start = std::time::Instant::now();
-        let result = if no_rag {
-            rag::bare_llm_query(&client, cfg, line).await
-        } else {
-            rag::rag_query(&client, cfg, line, k).await
-        };
-        match result {
-            Ok(answer) => {
-                let secs = start.elapsed().as_secs_f32();
-                println!("{}s)", secs);
-                println!();
-                println!("{answer}");
-            }
-            Err(e) => {
-                let secs = start.elapsed().as_secs_f32();
-                println!("{}s, ERROR)", secs);
-                eprintln!();
-                eprintln!("error: {e:#}");
-                if format!("{e:#}").contains("run `lorag ingest`") {
-                    eprintln!();
-                    eprintln!("hint: 你的 LanceDB 还没有摄入文档。先跑：");
-                    eprintln!("  lorag ingest <path>");
-                    eprintln!("或者用 --no-rag 跳过 RAG：");
-                    eprintln!("  lorag shell --no-rag");
-                }
-            }
-        }
-        println!();
-    }
-
-    Ok(())
-}
-
-fn print_shell_help() {
-    println!("commands:");
-    println!("  /help, /h, /?    show this help");
-    println!("  /status          show loaded models + LanceDB status");
-    println!("  /clear, /cls     clear the screen (50 newlines)");
-    println!("  /exit, /quit, /q exit the shell");
-    println!();
-    println!("anything else is treated as a question and sent through the RAG pipeline.");
-    println!("RAG: question → embed → top-K LanceDB search → context + question → LLM → answer");
-}
-
-fn print_shell_status(cfg: &config::AppConfig, k: usize, no_rag: bool) {
-    println!("status:");
-    println!("  LLM             : {}", cfg.llm_model);
-    println!("  Embedding       : {}", cfg.embed_model);
-    println!("  (dim auto-detected at load time)");
-    println!("  Models dir      : {}", cfg.models_dir.display());
-    println!("  LanceDB dir     : {}", cfg.lancedb_dir.display());
-    println!("  SQLite path     : {}", cfg.sqlite_path.display());
-    if no_rag {
-        println!("  RAG             : disabled (--no-rag)");
-    } else {
-        println!("  Top-K (this session): {k}");
-    }
-    println!("  Chunk size      : {}", cfg.chunk_size);
-    println!("  Chunk overlap   : {}", cfg.chunk_overlap);
-}
-
 async fn cmd_sources_list(cfg: &config::AppConfig, json: bool) -> Result<()> {
     use lorag::store::sqlite_store::SqliteStore;
 
@@ -542,11 +406,290 @@ fn truncate_str(s: &str, max: usize) -> String {
     }
 }
 
-async fn cmd_chat(message: Option<String>) -> Result<()> {
-    let msg = message
-        .as_deref()
-        .unwrap_or("(no message provided; use --message)");
-    anyhow::bail!("`lorag chat` is a placeholder in MVP (M7 计划实装). got: {msg:?}")
+/// M7 `lorag chat` —— 多轮对话 REPL（带历史 + RAG）。
+///
+/// 行为：
+/// - 启动时 load LLM + embedding（init 一次，不重 load）
+/// - 把每轮的 user/assistant 消息存 sqlite 的 `messages` 表
+/// - 下一轮 LLM call 前从 sqlite 读最近 N 条拼到 preamble
+/// - RAG 检索失败时退化成纯 chat（带历史无 context）
+/// - `/reset` 清空当前 session
+/// - `--session <id>` 续接已有 session
+/// - `--no-history` 每轮独立，不存不读历史
+async fn cmd_chat(
+    cfg: &config::AppConfig,
+    message: Option<String>,
+    session: Option<String>,
+    no_history: bool,
+    no_banner: bool,
+    no_rag: bool,
+    top_k: Option<usize>,
+) -> Result<()> {
+    use lorag::aha_provider::AhaClient;
+    use lorag::store::sqlite_store::SqliteStore;
+
+    let k = top_k.unwrap_or(cfg.top_k);
+    let session_id = session.unwrap_or_else(generate_session_id);
+    let sqlite = SqliteStore::open(&cfg.sqlite_path)
+        .with_context(|| format!("failed to open sqlite at {}", cfg.sqlite_path.display()))?;
+
+    if !no_banner {
+        print_chat_banner(cfg, &session_id, k, no_history, no_rag);
+    }
+
+    println!("loading models (10s~minutes first time, seconds after)...");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    let client = AhaClient::init(cfg.clone())
+        .await
+        .context("failed to init AhaClient — try `lorag models status` first")?;
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+
+    println!();
+    println!("ready. (type /help for commands)");
+    println!();
+
+    // 一次性首问模式（--message）
+    if let Some(msg) = message {
+        match run_chat_turn(
+            &client,
+            cfg,
+            &sqlite,
+            &session_id,
+            &msg,
+            k,
+            no_history,
+            no_rag,
+        )
+        .await
+        {
+            Ok(answer) => println!("\n{answer}\n"),
+            Err(e) => eprintln!("error: {e:#}"),
+        }
+        return Ok(());
+    }
+
+    // REPL loop
+    let stdin = std::io::stdin();
+    let mut stdout = std::io::stdout();
+    let mut input = String::new();
+
+    loop {
+        print!(">> ");
+        let _ = stdout.flush();
+        input.clear();
+        match stdin.read_line(&mut input) {
+            Ok(0) => {
+                println!();
+                break;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("read error: {e}");
+                break;
+            }
+        }
+
+        let line = input.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        // 内部命令（以 / 开头）
+        if let Some(cmd) = line.strip_prefix('/') {
+            let cmd_name = cmd.split_whitespace().next().unwrap_or("");
+            match cmd_name {
+                "exit" | "quit" | "q" => {
+                    println!("bye.");
+                    break;
+                }
+                "help" | "h" | "?" => {
+                    print_chat_help(no_history, no_rag);
+                }
+                "status" => {
+                    print_chat_status(cfg, &sqlite, &session_id, k, no_history, no_rag);
+                }
+                "clear" | "cls" => {
+                    for _ in 0..50 {
+                        println!();
+                    }
+                }
+                "reset" => match sqlite.clear_session(&session_id) {
+                    Ok(n) => println!("session reset: {session_id} ({n} message(s) cleared)"),
+                    Err(e) => eprintln!("failed to reset session: {e:#}"),
+                },
+                other => {
+                    eprintln!("unknown command: /{other} (try /help)");
+                }
+            }
+            continue;
+        }
+
+        // 普通问题 → 多轮 chat turn
+        match run_chat_turn(
+            &client,
+            cfg,
+            &sqlite,
+            &session_id,
+            line,
+            k,
+            no_history,
+            no_rag,
+        )
+        .await
+        {
+            Ok(answer) => println!("\n{answer}\n"),
+            Err(e) => eprintln!("error: {e:#}"),
+        }
+    }
+    Ok(())
+}
+
+/// 单轮 chat：拿历史 + 检索 → 拼 preamble → LLM → 存。
+#[allow(clippy::too_many_arguments)]
+async fn run_chat_turn(
+    client: &aha_provider::AhaClient,
+    cfg: &config::AppConfig,
+    sqlite: &lorag::store::sqlite_store::SqliteStore,
+    session_id: &str,
+    user_msg: &str,
+    top_k: usize,
+    no_history: bool,
+    no_rag: bool,
+) -> Result<String> {
+    use lorag::rag;
+
+    print!("(thinking... ");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    let start = std::time::Instant::now();
+
+    // 1. 加载历史
+    let history = if no_history {
+        Vec::new()
+    } else {
+        sqlite
+            .load_recent_messages(session_id, MAX_HISTORY_MESSAGES)
+            .context("failed to load chat history")?
+    };
+
+    // 2. RAG 检索（--no-rag 或失败 → 空 chunks）
+    let chunks = if no_rag {
+        Vec::new()
+    } else {
+        match rag::retrieve_chunks(client, cfg, user_msg, top_k).await {
+            Ok(c) => c,
+            Err(e) => {
+                let s = format!("{e:#}");
+                if rag::is_recoverable_error(&s) {
+                    eprintln!("\n(RAG unavailable: {s})");
+                    eprintln!("(hint: run `lorag ingest <path>` to enable retrieval)");
+                    eprintln!("(falling back to chat without context)");
+                    Vec::new()
+                } else {
+                    return Err(e);
+                }
+            }
+        }
+    };
+
+    // 3. 拼 preamble（history + context）
+    let preamble = rag::build_chat_preamble(&history, &chunks);
+
+    // 4. 调 LLM
+    let answer = rag::llm_complete(client, cfg, preamble, user_msg).await?;
+
+    let secs = start.elapsed().as_secs_f32();
+    println!("{secs:.1}s)");
+
+    // 5. 持久化（user + assistant）
+    if !no_history {
+        sqlite
+            .append_message(session_id, "user", user_msg)
+            .context("failed to persist user message")?;
+        sqlite
+            .append_message(session_id, "assistant", &answer)
+            .context("failed to persist assistant message")?;
+    }
+
+    Ok(answer)
+}
+
+fn print_chat_banner(
+    cfg: &config::AppConfig,
+    session_id: &str,
+    top_k: usize,
+    no_history: bool,
+    no_rag: bool,
+) {
+    println!(
+        "lorag chat v{} (multi-turn REPL)",
+        env!("CARGO_PKG_VERSION")
+    );
+    println!("  session:    {session_id}");
+    if no_history {
+        println!("  history:    disabled (--no-history, 每轮独立)");
+    } else {
+        println!(
+            "  history:    sqlite (max {} message(s) per turn)",
+            MAX_HISTORY_MESSAGES
+        );
+    }
+    println!("  LLM:        {}", cfg.llm_model);
+    println!("  Embedding:  {}", cfg.embed_model);
+    if no_rag {
+        println!("  RAG:        disabled (--no-rag)");
+    } else {
+        println!("  RAG:        enabled (top_k={top_k})");
+    }
+    println!();
+}
+
+fn print_chat_help(no_history: bool, no_rag: bool) {
+    println!("commands:");
+    println!("  /help, /h, /?    show this help");
+    println!("  /status          show session + history + model info");
+    println!("  /clear, /cls     clear the screen (50 newlines)");
+    if !no_history {
+        println!("  /reset           clear this session's history (keeps session id)");
+    }
+    println!("  /exit, /quit, /q exit the chat");
+    println!();
+    println!("anything else is treated as a question and sent through the chat pipeline.");
+    if no_rag {
+        println!("pipeline: question → LLM (RAG disabled)");
+    } else {
+        println!(
+            "pipeline: question → embed → top-K LanceDB search → history + context + question → LLM → answer"
+        );
+    }
+}
+
+fn print_chat_status(
+    cfg: &config::AppConfig,
+    sqlite: &lorag::store::sqlite_store::SqliteStore,
+    session_id: &str,
+    top_k: usize,
+    no_history: bool,
+    no_rag: bool,
+) {
+    println!("status:");
+    println!("  session:    {session_id}");
+    if no_history {
+        println!("  history:    disabled (--no-history)");
+    } else {
+        let count = sqlite.session_message_count(session_id).unwrap_or(-1);
+        println!(
+            "  history:    {count} message(s) in sqlite (max {MAX_HISTORY_MESSAGES} per turn)"
+        );
+    }
+    println!("  LLM:        {}", cfg.llm_model);
+    println!("  Embedding:  {}", cfg.embed_model);
+    println!("  LanceDB:    {}", cfg.lancedb_dir.display());
+    if no_rag {
+        println!("  RAG:        disabled (--no-rag)");
+    } else {
+        println!("  Top-K:      {top_k}");
+    }
+    println!("  Chunk size: {}", cfg.chunk_size);
 }
 
 /// `lorag doctor` —— 诊断环境。
