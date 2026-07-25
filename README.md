@@ -53,10 +53,10 @@ lorag query "文档里讲了什么？"
 **换 embedding 模型**（会让向量维度变）：
 1. 改 `.env` 里的 `EMBED_MODEL`
 2. 跑 `lorag models pull`（下新模型）
-3. **`rm -rf data/lancedb data/lorag.db`**（**两个都要删**——lancedb 的向量维度硬编码在 schema；sqlite 的 `chunks` 表有 `UNIQUE(source_id, ordinal)` 约束，旧 chunks 不删重 ingest 会撞唯一索引）
-4. `lorag ingest <path>` 重新摄入
+3. 跑 `lorag reindex <path>` 重新摄入（**自动**清 LanceDB + SQLite + 重新 ingest 一次）
 
 > 向量维度不需要手动配——`lorag` 启动时自动从 embedding 模型的 `config.json::hidden_size` 读出来。
+> 想看 `reindex` 会做什么但不真跑：`lorag reindex --dry-run <path>`。
 
 只换 LLM（不改 embedding）不用清数据库——只更新 `LLM_MODEL` + `lorag models pull` 就行。
 
@@ -109,6 +109,9 @@ lorag shell                  # REPL：循环 query（init 一次不重 load）
     --no-banner              # 安静启动
 lorag sources list           # 列出已摄入文件
     --json
+lorag reindex <PATH>...      # 清 LanceDB + SQLite 后重新摄入（换 EMBED_MODEL 后必须走这个）
+    --yes / -y                # 跳过确认
+    --dry-run                 # 只打印不真做
 lorag chat                   # M7 计划：真多轮对话（占位 stub）
 lorag doctor                 # ✅ 诊断环境：.env / 模型 / 存储 / 编译 feature（全 PASS exit 0）
 ```

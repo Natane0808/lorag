@@ -9,6 +9,7 @@
 > - M4 rig 0.40 provider 适配：✅ `lorag query "1+1=?"` 拿到 `"1 + 1 = 2"`（via rig CompletionModel）
 > - M5 RAG 端到端：✅ **重写绕开 `dynamic_context` 的 62GB 内存 bug**；`lorag query` / `lorag shell` 都跑通
 > - `lorag doctor`：✅ 诊断命令（env / models / storage / build features，11 项检查）
+> - `lorag reindex`：✅ M5.1 实装（清 LanceDB + SQLite 后重新摄入，用于换 EMBED_MODEL 后）
 > - 待办：M6 smoke test
 >
 > 后续功能（chat REPL 流式、多用户、混合检索、re-rank、ANN 索引）会在 `## 后续迭代` 一节追加。
@@ -193,7 +194,7 @@ lorag models pull
 ## 5. 目录结构（MVP）
 
 > **实装状态**：
-> - ✅ `src/main.rs`（CLI 骨架 + `init` / `query` / `shell` / `models` / `sources` / `chat` 命令）
+> - ✅ `src/main.rs`（CLI 骨架 + `init` / `query` / `shell` / `models` / `sources` / `reindex` / `chat` / `doctor` 命令）
 > - ✅ `src/lib.rs`（模块声明）
 > - ✅ `src/config.rs`（dotenvy + `AppConfig` + validate）
 > - ✅ `src/aha_provider.rs`（path resolve + `AhaClient::init` + `llm_generate` / `embed_texts`）
@@ -214,7 +215,7 @@ lorag/
 ├── PLAN.md
 ├── AGENTS.md
 ├── src/
-│   ├── main.rs                     # ✅ CLI 入口（clap）：init / query / shell / models / sources / chat
+│   ├── main.rs                     # ✅ CLI 入口（clap）：init / query / shell / models / sources / reindex / chat / doctor
 │   ├── lib.rs                      # ✅ 模块声明（pub mod aha_provider / config / rig_compat / rag）
 │   ├── config.rs                   # ✅ AppConfig：LLM_MODEL / EMBED_MODEL / MODELS_DIR / ...
 │   ├── aha_provider.rs             # ✅ AhaClient + ensure_model_downloaded + models_status + resolve_model_path
@@ -663,7 +664,15 @@ lorag init                       # ✅ M1 实装：把 LLM + embedding 加载进
 lorag sources list               # ✅ M3 实装：列出已摄入文件
     --json
 
-lorag chat                       # ⏳ M7 计划：多轮对话 REPL（MVP 占位，打印"not implemented in MVP"）
+lorag reindex <PATH>...          # ✅ M5.1 实装：清 LanceDB + SQLite 后重新摄入
+    --ext <list>                  # 同 ingest
+    --recursive / --no-recursive  # 同 ingest
+    --yes / -y                    # 跳过 interactive 确认
+    --dry-run                     # 只打印会做什么，不真删不真 ingest
+                                 #   适用：换 EMBED_MODEL 后清数据；想完全重建
+                                 #   不删模型文件（MODELS_DIR/）—— 模型仍走 `models pull`
+
+lorag chat                       # ⏳ M7 计划：多轮对话 REPL（MVP 占位，打印"not implemented in MVP")
 ```
 
 > 全部命令均带 `--help`，错误信息用 `anyhow` 打印，exit code 1。
@@ -844,6 +853,7 @@ incremental = true
 ### 11.2 其他待办
 
 - `lorag chat` 多轮 REPL + SQLite 持久化历史（M7，见 §11.1）
+- `lorag reindex` ✅ M5.1 已实装（`src/main.rs::cmd_reindex`）：删 lancedb + sqlite 后重新 ingest。自动检测 embed_model 变化（MVP 不做，太重；用户手动跑 reindex 即可）。
 - 流式输出（aha 支持 SSE）
 - Web UI（axum）
 - 混合检索（SQLite FTS5 BM25 + 向量 RRF 融合）

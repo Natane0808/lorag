@@ -107,6 +107,36 @@ enum Command {
 
     /// 诊断环境：检查 .env / 模型文件 / 存储路径 / 编译 feature
     Doctor,
+
+    /// 清掉 LanceDB + SQLite 后重新摄入（换 embedding 模型后必须走这个）
+    Reindex {
+        /// 一个或多个文件 / 目录
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+
+        /// 限定扩展名（逗号分隔），默认全开
+        #[arg(long, value_delimiter = ',', default_values_t = vec![
+            "pdf".to_string(),
+            "docx".to_string(),
+            "pptx".to_string(),
+            "xlsx".to_string(),
+            "md".to_string(),
+            "txt".to_string(),
+        ])]
+        ext: Vec<String>,
+
+        /// 目录是否递归
+        #[arg(long, default_value_t = true)]
+        recursive: bool,
+
+        /// 跳过 interactive 确认
+        #[arg(long, short = 'y')]
+        yes: bool,
+
+        /// 只打印会做什么，不真删不真 ingest
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -195,6 +225,13 @@ fn run(cli: Cli) -> Result<()> {
             },
             Command::Chat { message } => cmd_chat(message).await,
             Command::Doctor => cmd_doctor(&cfg),
+            Command::Reindex {
+                paths,
+                ext,
+                recursive,
+                yes,
+                dry_run,
+            } => cmd_reindex(&cfg, paths, ext, recursive, yes, dry_run).await,
         }
     })
 }
@@ -525,4 +562,138 @@ fn cmd_doctor(cfg: &config::AppConfig) -> Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// `lorag reindex` —— 删 LanceDB + SQLite 后重新摄入。
+///
+/// 适用场景：
+/// - 换了 `EMBED_MODEL`（向量维度变了）→ lancedb schema 跟 dim 不匹配
+/// - 想完全重建（不管有没有变）
+///
+/// 流程：interactive 确认（除非 `--yes`） → 删 lancedb 目录 + sqlite 主文件 + WAL/SHM
+///   → 调 `pipeline::run_ingest` 重新摄入。
+///
+/// **不**删模型文件（`MODELS_DIR/`）。模型仍然要走 `lorag models pull` 单独下。
+async fn cmd_reindex(
+    cfg: &config::AppConfig,
+    paths: Vec<PathBuf>,
+    ext: Vec<String>,
+    recursive: bool,
+    yes: bool,
+    dry_run: bool,
+) -> Result<()> {
+    use lorag::aha_provider::AhaClient;
+    use lorag::ingest::pipeline;
+
+    let sqlite_files = sqlite_files_for(&cfg.sqlite_path);
+
+    if dry_run {
+        println!("DRY RUN — nothing will be deleted or ingested.");
+        println!();
+        println!("would delete:");
+        println!("  {}", cfg.lancedb_dir.display());
+        for f in &sqlite_files {
+            println!("  {}", f.display());
+        }
+        println!();
+        println!("would re-ingest from:");
+        for p in &paths {
+            println!("  {}", p.display());
+        }
+        println!();
+        println!("hint: pass --yes (or interactive `y`) to actually do it.");
+        return Ok(());
+    }
+
+    // 1. 打印计划
+    println!("reindex will:");
+    println!("  delete:");
+    println!("    {}", cfg.lancedb_dir.display());
+    for f in &sqlite_files {
+        println!("    {}", f.display());
+    }
+    println!("  re-ingest from:");
+    for p in &paths {
+        println!("    {}", p.display());
+    }
+    println!();
+    println!(
+        "(model files in {} are NOT touched)",
+        cfg.models_dir.display()
+    );
+    println!();
+
+    // 2. 确认
+    if !yes {
+        print!("proceed? [y/N] ");
+        std::io::Write::flush(&mut std::io::stdout())?;
+        let mut input = String::new();
+        std::io::stdin()
+            .read_line(&mut input)
+            .context("failed to read confirmation")?;
+        let ans = input.trim().to_lowercase();
+        if ans != "y" && ans != "yes" {
+            println!("aborted.");
+            return Ok(());
+        }
+    }
+
+    // 3. 删 lancedb 目录（不存在 OK）
+    match std::fs::remove_dir_all(&cfg.lancedb_dir) {
+        Ok(()) => println!("removed: {}", cfg.lancedb_dir.display()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            println!("(already gone: {})", cfg.lancedb_dir.display());
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "failed to delete {}: {}",
+                cfg.lancedb_dir.display(),
+                e
+            ));
+        }
+    }
+
+    // 4. 删 sqlite 主文件 + WAL/SHM/Journal（不存在 OK）
+    for f in &sqlite_files {
+        match std::fs::remove_file(f) {
+            Ok(()) => println!("removed: {}", f.display()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(anyhow::anyhow!("failed to delete {}: {}", f.display(), e));
+            }
+        }
+    }
+
+    // 5. 重新 ingest
+    println!();
+    println!("loading embedding model for re-ingest (skipping LLM to save memory + time)...");
+    let client = AhaClient::init_embed_only(cfg.clone())
+        .await
+        .context("failed to init AhaClient for reindex")?;
+
+    // reindex 强制重摄入（hash 检查不适用，因为旧记录已删）
+    let counts = pipeline::run_ingest(&client, cfg, &paths, &ext, /*force=*/ true, recursive)
+        .await
+        .context("re-ingest pipeline failed")?;
+
+    println!();
+    println!(
+        "done. ok={} skipped={} failed={}",
+        counts.ok, counts.skipped, counts.failed
+    );
+    Ok(())
+}
+
+/// 列出 sqlite 主文件 + 旁文件（journal / wal / shm）。
+///
+/// 直接在原路径字符串上 append suffix（不用 `set_file_name`）—— 保持跟 `cfg.sqlite_path`
+/// 一样的分隔符风格（避免 Windows 上 `set_file_name` 跟 parent 的 forward slash 混出来
+/// `data\foo.db-wal` 这种丑格式）。功能上 `remove_file` 都认，但 display 出来难看。
+fn sqlite_files_for(sqlite_path: &std::path::Path) -> Vec<PathBuf> {
+    let mut out = vec![sqlite_path.to_path_buf()];
+    let base = sqlite_path.to_string_lossy();
+    for suffix in ["-journal", "-wal", "-shm"] {
+        out.push(std::path::PathBuf::from(format!("{base}{suffix}")));
+    }
+    out
 }
