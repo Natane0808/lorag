@@ -230,9 +230,11 @@ pub fn print_models_status(statuses: &[ModelStatus]) {
 /// - LLM 和 embedding 用**各自**的 `Mutex`（不共享一个），让 embed 和 generate 能并发
 /// - 同步 candle 调用一律包成 `tokio::task::spawn_blocking`，避免阻塞 reactor
 /// - 路径用 [`resolve_model_path`]，不依赖 aha 的 `is_model_downloaded` / `get_default_weight_path`
+/// - `llm` 是 `Option`——`init` 同时 load LLM+embedding（query / shell 用），
+///   `init_embed_only` 只 load embedding（ingest 用，省 LLM 的 ~8GB 内存 + 数秒到数分钟 load 时间）
 #[derive(Clone)]
 pub struct AhaClient {
-    llm: Arc<Mutex<ModelInstance<'static>>>,
+    llm: Option<Arc<Mutex<ModelInstance<'static>>>>,
     embed: Arc<Mutex<ModelInstance<'static>>>,
     cfg: Arc<AppConfig>,
 }
@@ -334,10 +336,73 @@ impl AhaClient {
         })?;
 
         Ok(Self {
-            llm: Arc::new(Mutex::new(llm)),
+            llm: Some(Arc::new(Mutex::new(llm))),
             embed: Arc::new(Mutex::new(embed)),
             cfg,
         })
+    }
+
+    /// 只 load embedding（**不** load LLM）。
+    ///
+    /// 用途：`lorag ingest` 只需要 embedding 来向量化 chunk，加载 LLM 纯属浪费
+    /// （4B LLM ~8GB 内存 + 数十秒 load）。`llm` 字段是 `None`，
+    /// 任何调用 `completion_model` / `llm_generate` 的代码会拿一个明确的错误，
+    /// 不会"意外"调到一个空的占位符。
+    pub async fn init_embed_only(cfg: AppConfig) -> Result<Self> {
+        let cfg = Arc::new(cfg);
+
+        // 1. 解析 embedding id + 找本地路径
+        let embed_which = WhichModel::from_str(&cfg.embed_model_repo, true).map_err(|_| {
+            anyhow!(
+                "config: EMBED_MODEL_REPO `{}` is not recognized by aha (see aha::models::common::model_mapping)",
+                cfg.embed_model_repo
+            )
+        })?;
+        let embed_path =
+            resolve_model_path(&cfg.embed_model_repo, &cfg.models_dir).ok_or_else(|| {
+                anyhow!(
+                    "failed to init AhaClient: embedding model not found at {}/{} or ~/.aha/{} (run: lorag models pull)",
+                    cfg.models_dir.display(),
+                    cfg.embed_model_repo,
+                    cfg.embed_model_repo
+                )
+            })?;
+
+        // 2. leak path 成 &'static str
+        let embed_path_str = leak_path_str(&embed_path);
+
+        // 3. load embedding
+        println!(
+            "loading embedding {} from {} (may take 10s~minutes)...",
+            cfg.embed_model_repo,
+            embed_path.display()
+        );
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        let embed_repo = cfg.embed_model_repo.clone();
+        let embed_path_for_err = embed_path.clone();
+        let embed = tokio::task::spawn_blocking(move || {
+            load_model(embed_which, embed_path_str, None, None)
+        })
+        .await
+        .context("embedding load task panicked")?
+        .with_context(|| {
+            format!(
+                "failed to load embedding `{embed_repo}` from {}",
+                embed_path_for_err.display()
+            )
+        })?;
+
+        Ok(Self {
+            llm: None,
+            embed: Arc::new(Mutex::new(embed)),
+            cfg,
+        })
+    }
+
+    /// 是否 load 了 LLM（`init` → true，`init_embed_only` → false）。
+    /// `AhaCompletionModel::completion` 调这个判断要不要报错。
+    pub fn has_llm(&self) -> bool {
+        self.llm.is_some()
     }
 
     /// 访问配置。
@@ -352,7 +417,13 @@ impl AhaClient {
         &self,
         params: ChatCompletionParameters,
     ) -> Result<ChatCompletionResponse> {
-        let llm = self.llm.clone();
+        let llm = self.llm.as_ref().ok_or_else(|| {
+            anyhow!(
+                "AhaClient has no LLM loaded (was created via init_embed_only); \
+                 call `init` (loads both LLM + embedding) instead of `init_embed_only`"
+            )
+        })?;
+        let llm = llm.clone();
         tokio::task::spawn_blocking(move || llm.blocking_lock().generate(params))
             .await
             .context("LLM generate task panicked")?

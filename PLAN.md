@@ -3,6 +3,7 @@
 > 状态：**M0–M5 已完成；`lorag doctor` 已实装；M6 smoke test 待办**。
 > - M0 CLI 骨架 + config：✅ `lorag --help` / `lorag models status` 跑通
 > - M1 `AhaClient::init` 实装 load_model：✅ 0.6B 端到端 load 成功（4B 8GB+ 等用户手动验证）
+> - 后续优化：`AhaClient::init_embed_only` 只 load embedding（ingest 路径省 LLM 的 8GB 内存 + 数十秒 load）
 > - M2 文档 loaders：✅ pdf / docx / pptx / xlsx / md / txt 6 种
 > - M3 摄入 pipeline：✅ chunker + lancedb_store + sqlite_store
 > - M4 rig 0.40 provider 适配：✅ `lorag query "1+1=?"` 拿到 `"1 + 1 = 2"`（via rig CompletionModel）

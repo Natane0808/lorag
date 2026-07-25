@@ -106,8 +106,10 @@ config ──┬──→ aha_provider ─────┐    （aha lib 适配 +
 
 - **`config` 不依赖**任何业务模块；其他模块都依赖 `config`。
 - **`aha_provider` 是 aha ↔ rig 适配 + 模型生命周期的唯一入口**：
-  - `AhaClient` 持有 `Arc<tokio::sync::Mutex<ModelInstance<'static>>>` × 2（LLM / embedding 各自独立锁）
-  - `AhaClient::init(...)` 调 `aha::models::load_model`（被 `lorag init` / `lorag models status --init` / `lorag query` / `lorag shell` 调用）
+  - `AhaClient` 持有 `Option<Arc<Mutex<ModelInstance<'static>>>>`（LLM）+ `Arc<Mutex<ModelInstance<'static>>>`（embedding），LLM / embedding 各自独立锁
+  - `AhaClient::init(...)` 调 `aha::models::load_model` 同时 load LLM + embedding（被 `lorag init` / `lorag models status --init` / `lorag query` / `lorag shell` 调用）
+  - `AhaClient::init_embed_only(...)` 只 load embedding（被 `lorag ingest` 调用）—— 省 LLM 的 ~8GB 内存 + 数十秒 load
+  - `AhaClient::has_llm()` 区分两种 client；`llm_generate` 在 `llm == None` 时报清晰错误（不返回空结果）
   - `ensure_model_downloaded(...)` 调 `aha::utils::download_model`（被 `lorag models pull` 调用）
   - `resolve_model_path(...)` 查 `MODELS_DIR/{repo}/` 优先 + `~/.aha/{repo}/` 兜底（**不**用 aha 的 `is_model_downloaded`，因为它写死查 `~/.aha/`，跟 `download_model` 的 `save_dir` 路径不同步——详见 §6 禁止事项）
   - async helper `llm_generate` / `embed_texts` 把同步 candle 调用包成 `tokio::task::spawn_blocking`
@@ -155,7 +157,7 @@ config ──┬──→ aha_provider ─────┐    （aha lib 适配 +
 
 - aha 的 `load_model(which, model_path, None, None)` 返回 `ModelInstance<'static>`。
 - `model_path` 必须是 `&'static str` → 用 `aha::utils::string_to_static_str(path)` leak。
-- 启动时构造一次（`AhaClient::init`），用 `Arc<RwLock<AhaModelSet>>` 共享给两个 model。
+- 启动时构造一次（`AhaClient::init` 或 `init_embed_only`），用 `Arc<Mutex<...>>` 共享给两个 model。
 - **不要在每次 `agent.prompt()` 时重新 load 模型**——load 很慢（数 GB 模型要数十秒）。
 - 模型本地路径 = `{MODELS_DIR}/{MODEL_REPO}/`，`aha::utils::download_model` 把模型下到这个位置。
 - 模型 id 解析：`WhichModel::from_str(model_id, true)`（它实现了 `clap::ValueEnum`）。失败说明用户写错 id。

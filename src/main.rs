@@ -213,9 +213,10 @@ async fn cmd_ingest(
     use lorag::aha_provider::AhaClient;
     use lorag::ingest::pipeline;
 
-    // M3 ingest 需要 AhaClient 来调 embedding 模型
-    println!("loading models for ingest...");
-    let client = AhaClient::init(cfg.clone())
+    // ingest 只需要 embedding 模型来向量化 chunk，加载 LLM 纯属浪费
+    // （4B LLM ~8GB 内存 + 数十秒 load）。用 init_embed_only 跳过 LLM。
+    println!("loading embedding model for ingest (skipping LLM to save memory + time)...");
+    let client = AhaClient::init_embed_only(cfg.clone())
         .await
         .context("failed to init AhaClient for ingest")?;
 
