@@ -86,41 +86,15 @@ pub fn resolve_model_path(repo: &str, save_dir: &Path) -> Option<PathBuf> {
 
 /// 从模型目录的 `config.json` 读 `hidden_size` 字段。
 ///
-/// 用于在 `AhaClient::init` 时校验 `.env` 的 `EMBED_DIM` 跟模型实际输出维度是否一致。
 /// 大多数 HuggingFace embedding 模型（包括 Qwen3-Embedding / MiniLM）都用 `hidden_size`
-/// 表示 embedding 维度。读不到就返回 `None`（不阻止启动，只是不做这个检查）。
+/// 表示 embedding 维度。AhaClient load 完 embedding 模型后，用这个函数从模型目录
+/// 读出维度存到 `AhaClient.embed_dim` 里（不再需要用户配 .env 的 `EMBED_DIM`）。
+/// 读不到就返回 `None`（非 HF 格式模型，调用方需要 fallback）。
 pub fn read_hidden_size_from_config(model_path: &Path) -> Option<usize> {
     let config_path = model_path.join("config.json");
     let bytes = std::fs::read(&config_path).ok()?;
     let json: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    // HF transformers 标准字段。某些老模型（BERT 时代）用 `hidden_size` 也行；
-    // 如果以后碰不到就 fallback 到 dummy embed（先不做）。
     json.get("hidden_size")?.as_u64().map(|n| n as usize)
-}
-
-/// 校验 `.env` 的 `EMBED_DIM` 跟 embedding 模型实际 `hidden_size` 是否一致。
-///
-/// 不一致就 bail，错误信息列出两个选项 + 提示清数据重建（lancedb schema 维度硬编码）。
-/// `read_hidden_size_from_config` 返回 `None`（读不到 config.json）时 silently skip，
-/// 不阻止启动（用户可能用的是非 HF 格式模型）。
-fn check_embed_dim(cfg: &AppConfig, embed_path: &Path) -> Result<()> {
-    if let Some(actual) = read_hidden_size_from_config(embed_path)
-        && actual != cfg.embed_dim
-    {
-        anyhow::bail!(
-            "config: EMBED_DIM={} in .env but `{}` actually outputs {}-dim vectors. \
-             Fix one of:\n  \
-             - set EMBED_DIM={} in .env to match the model, OR\n  \
-             - set EMBED_MODEL_REPO in .env to a model that outputs {}-dim vectors,\n\
-             then wipe the old index: rm -rf data/lancedb data/lorag.db && lorag ingest <path>",
-            cfg.embed_dim,
-            cfg.embed_model_repo,
-            actual,
-            actual,
-            cfg.embed_dim,
-        );
-    }
-    Ok(())
 }
 
 // =============================================================================
@@ -207,7 +181,7 @@ impl ModelStatus {
 /// **不**做加载（加载是 M1 阶段 AhaClient::init 的事）。仅返回文件存在性给 CLI 打印。
 pub fn models_status(cfg: &AppConfig) -> Result<Vec<ModelStatus>> {
     // 顺便做 id 校验
-    for id in [&cfg.llm_model_repo, &cfg.embed_model_repo] {
+    for id in [&cfg.llm_model, &cfg.embed_model] {
         WhichModel::from_str(id, true).map_err(|_| {
             anyhow!(
                 "config: model id `{id}` is not recognized by aha (see aha::models::common::model_mapping)"
@@ -215,8 +189,8 @@ pub fn models_status(cfg: &AppConfig) -> Result<Vec<ModelStatus>> {
         })?;
     }
     Ok(vec![
-        ModelStatus::check(&cfg.llm_model_repo, &cfg.models_dir),
-        ModelStatus::check(&cfg.embed_model_repo, &cfg.models_dir),
+        ModelStatus::check(&cfg.llm_model, &cfg.models_dir),
+        ModelStatus::check(&cfg.embed_model, &cfg.models_dir),
     ])
 }
 
@@ -271,18 +245,24 @@ pub fn print_models_status(statuses: &[ModelStatus]) {
 /// - 路径用 [`resolve_model_path`]，不依赖 aha 的 `is_model_downloaded` / `get_default_weight_path`
 /// - `llm` 是 `Option`——`init` 同时 load LLM+embedding（query / shell 用），
 ///   `init_embed_only` 只 load embedding（ingest 用，省 LLM 的 ~8GB 内存 + 数秒到数分钟 load 时间）
+/// - `embed_dim` 在 load embedding 模型后从 `config.json::hidden_size` 读出来；
+///   lancedb schema 跟模型走，**不再需要** .env 的 `EMBED_DIM`
 #[derive(Clone)]
 pub struct AhaClient {
     llm: Option<Arc<Mutex<ModelInstance<'static>>>>,
     embed: Arc<Mutex<ModelInstance<'static>>>,
+    /// embedding 模型的实际输出维度（load 后从 `config.json::hidden_size` 读）。
+    /// 启动期间都填好；用于 lancedb 建表 / query 维度校验。
+    embed_dim: Option<usize>,
     cfg: Arc<AppConfig>,
 }
 
 impl std::fmt::Debug for AhaClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AhaClient")
-            .field("llm_repo", &self.cfg.llm_model_repo)
-            .field("embed_repo", &self.cfg.embed_model_repo)
+            .field("llm_model", &self.cfg.llm_model)
+            .field("embed_model", &self.cfg.embed_model)
+            .field("embed_dim", &self.embed_dim)
             .finish_non_exhaustive()
     }
 }
@@ -299,39 +279,39 @@ impl AhaClient {
         let cfg = Arc::new(cfg);
 
         // 1. 解析 id + 找本地路径
-        let llm_which = WhichModel::from_str(&cfg.llm_model_repo, true).map_err(|_| {
+        let llm_which = WhichModel::from_str(&cfg.llm_model, true).map_err(|_| {
             anyhow!(
-                "config: LLM_MODEL_REPO `{}` is not recognized by aha (see aha::models::common::model_mapping)",
-                cfg.llm_model_repo
+                "config: LLM_MODEL `{}` is not recognized by aha (see aha::models::common::model_mapping)",
+                cfg.llm_model
             )
         })?;
-        let embed_which = WhichModel::from_str(&cfg.embed_model_repo, true).map_err(|_| {
+        let embed_which = WhichModel::from_str(&cfg.embed_model, true).map_err(|_| {
             anyhow!(
-                "config: EMBED_MODEL_REPO `{}` is not recognized by aha (see aha::models::common::model_mapping)",
-                cfg.embed_model_repo
+                "config: EMBED_MODEL `{}` is not recognized by aha (see aha::models::common::model_mapping)",
+                cfg.embed_model
             )
         })?;
-        let llm_path = resolve_model_path(&cfg.llm_model_repo, &cfg.models_dir).ok_or_else(|| {
+        let llm_path = resolve_model_path(&cfg.llm_model, &cfg.models_dir).ok_or_else(|| {
             anyhow!(
                 "failed to init AhaClient: LLM model not found at {}/{} or ~/.aha/{} (run: lorag models pull)",
                 cfg.models_dir.display(),
-                cfg.llm_model_repo,
-                cfg.llm_model_repo
+                cfg.llm_model,
+                cfg.llm_model
             )
         })?;
         let embed_path =
-            resolve_model_path(&cfg.embed_model_repo, &cfg.models_dir).ok_or_else(|| {
+            resolve_model_path(&cfg.embed_model, &cfg.models_dir).ok_or_else(|| {
                 anyhow!(
                     "failed to init AhaClient: embedding model not found at {}/{} or ~/.aha/{} (run: lorag models pull)",
                     cfg.models_dir.display(),
-                    cfg.embed_model_repo,
-                    cfg.embed_model_repo
+                    cfg.embed_model,
+                    cfg.embed_model
                 )
             })?;
 
-        // 1.5. 校验 .env 的 EMBED_DIM 跟模型实际 hidden_size 是否一致
-        // （lancedb schema 维度硬编码，错了会等到 embed 时才炸；这里提前拦）
-        check_embed_dim(&cfg, &embed_path)?;
+        // 2. 读 embedding 模型维度（从 config.json），存到 AhaClient
+        // 失败（读不到 config.json）就让后续 embed_texts 报错
+        let embed_dim = read_hidden_size_from_config(&embed_path);
 
         // 2. load_model 接受 &str，且需要 'static（用于 leak 成 &'static str 喂给 candle mmap）
         let llm_path_str = leak_path_str(&llm_path);
@@ -340,12 +320,12 @@ impl AhaClient {
         // 3. 真正加载：candle 同步阻塞，必须 spawn_blocking。模型越大越慢
         println!(
             "loading LLM {} from {} (may take 10s~minutes)...",
-            cfg.llm_model_repo,
+            cfg.llm_model,
             llm_path.display()
         );
         // PowerShell capture 模式下 stdout 全缓冲，强制 flush 让用户能看到进度
         let _ = std::io::Write::flush(&mut std::io::stdout());
-        let llm_repo = cfg.llm_model_repo.clone();
+        let llm_repo = cfg.llm_model.clone();
         let llm_path_for_err = llm_path.clone();
         let llm =
             tokio::task::spawn_blocking(move || load_model(llm_which, llm_path_str, None, None))
@@ -360,11 +340,11 @@ impl AhaClient {
 
         println!(
             "loading embedding {} from {} (may take 10s~minutes)...",
-            cfg.embed_model_repo,
+            cfg.embed_model,
             embed_path.display()
         );
         let _ = std::io::Write::flush(&mut std::io::stdout());
-        let embed_repo = cfg.embed_model_repo.clone();
+        let embed_repo = cfg.embed_model.clone();
         let embed_path_for_err = embed_path.clone();
         let embed = tokio::task::spawn_blocking(move || {
             load_model(embed_which, embed_path_str, None, None)
@@ -381,6 +361,7 @@ impl AhaClient {
         Ok(Self {
             llm: Some(Arc::new(Mutex::new(llm))),
             embed: Arc::new(Mutex::new(embed)),
+            embed_dim,
             cfg,
         })
     }
@@ -395,24 +376,24 @@ impl AhaClient {
         let cfg = Arc::new(cfg);
 
         // 1. 解析 embedding id + 找本地路径
-        let embed_which = WhichModel::from_str(&cfg.embed_model_repo, true).map_err(|_| {
+        let embed_which = WhichModel::from_str(&cfg.embed_model, true).map_err(|_| {
             anyhow!(
-                "config: EMBED_MODEL_REPO `{}` is not recognized by aha (see aha::models::common::model_mapping)",
-                cfg.embed_model_repo
+                "config: EMBED_MODEL `{}` is not recognized by aha (see aha::models::common::model_mapping)",
+                cfg.embed_model
             )
         })?;
         let embed_path =
-            resolve_model_path(&cfg.embed_model_repo, &cfg.models_dir).ok_or_else(|| {
+            resolve_model_path(&cfg.embed_model, &cfg.models_dir).ok_or_else(|| {
                 anyhow!(
                     "failed to init AhaClient: embedding model not found at {}/{} or ~/.aha/{} (run: lorag models pull)",
                     cfg.models_dir.display(),
-                    cfg.embed_model_repo,
-                    cfg.embed_model_repo
+                    cfg.embed_model,
+                    cfg.embed_model
                 )
             })?;
 
-        // 1.5. 校验 .env 的 EMBED_DIM 跟模型实际 hidden_size 是否一致
-        check_embed_dim(&cfg, &embed_path)?;
+        // 1.5. 读 embedding 模型维度（从 config.json），存到 AhaClient
+        let embed_dim = read_hidden_size_from_config(&embed_path);
 
         // 2. leak path 成 &'static str
         let embed_path_str = leak_path_str(&embed_path);
@@ -420,11 +401,11 @@ impl AhaClient {
         // 3. load embedding
         println!(
             "loading embedding {} from {} (may take 10s~minutes)...",
-            cfg.embed_model_repo,
+            cfg.embed_model,
             embed_path.display()
         );
         let _ = std::io::Write::flush(&mut std::io::stdout());
-        let embed_repo = cfg.embed_model_repo.clone();
+        let embed_repo = cfg.embed_model.clone();
         let embed_path_for_err = embed_path.clone();
         let embed = tokio::task::spawn_blocking(move || {
             load_model(embed_which, embed_path_str, None, None)
@@ -441,6 +422,7 @@ impl AhaClient {
         Ok(Self {
             llm: None,
             embed: Arc::new(Mutex::new(embed)),
+            embed_dim,
             cfg,
         })
     }
@@ -449,6 +431,18 @@ impl AhaClient {
     /// `AhaCompletionModel::completion` 调这个判断要不要报错。
     pub fn has_llm(&self) -> bool {
         self.llm.is_some()
+    }
+
+    /// Embedding 模型的实际输出维度。
+    ///
+    /// 在 `init` / `init_embed_only` 成功后存到 client 里（从模型目录的
+    /// `config.json::hidden_size` 读出来）。lancedb schema 用这个值，**不再需要**
+    /// 用户在 `.env` 配 `EMBED_DIM`。
+    ///
+    /// 理论上永远有值（init 时就读了），但万一 `config.json` 读不到（比如非 HF 格式
+    /// 模型）会返回 `None`。None 时调用方应该走 fallback（dummy embed 测 / 报错）。
+    pub fn embed_dim(&self) -> Option<usize> {
+        self.embed_dim
     }
 
     /// 访问配置。

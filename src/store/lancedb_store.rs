@@ -18,7 +18,7 @@ use crate::models::Chunk;
 /// 打开（或创建）LanceDB 的 `documents` 表。
 ///
 /// schema: id (Utf8), source_path (Utf8), chunk_ordinal (Int64), text (Utf8),
-///          embedding (FixedSizeList<Float64, EMBED_DIM>)
+///          embedding (FixedSizeList<Float64, N>) —— N 跟 AhaClient 加载的模型走（不再用 cfg.embed_dim）
 pub async fn ensure_table(lancedb_dir: &Path, embed_dim: usize) -> Result<lancedb::Table> {
     let db = connect(lancedb_dir.to_str().ok_or_else(|| {
         anyhow::anyhow!("lancedb path is not valid UTF-8: {}", lancedb_dir.display())

@@ -173,7 +173,9 @@ impl EmbeddingModel for AhaEmbeddingModel {
     type Client = AhaClient;
 
     fn make(client: &Self::Client, model: impl Into<String>, dims: Option<usize>) -> Self {
-        let ndims = dims.unwrap_or_else(|| client.config().embed_dim);
+        // 优先用调用方显式传的 dims（rig 0.40 支持），否则从 AhaClient 拿模型实际 dim
+        // （load 时从 config.json 读的，不再从 .env 读）
+        let ndims = dims.unwrap_or_else(|| client.embed_dim().unwrap_or(0));
         Self {
             client: client.clone(),
             model: model.into(),
@@ -215,7 +217,7 @@ impl EmbeddingsClient for AhaClient {
         AhaEmbeddingModel {
             client: self.clone(),
             model: model.into(),
-            ndims: self.config().embed_dim,
+            ndims: self.embed_dim().unwrap_or(0),
         }
     }
 

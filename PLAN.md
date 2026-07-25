@@ -181,10 +181,10 @@ user question
 **下载模型（models pull）**：
 ```
 lorag models pull
-  → aha_provider::ensure_model_downloaded(LLM_MODEL_REPO, MODELS_DIR)
+  → aha_provider::ensure_model_downloaded(LLM_MODEL, MODELS_DIR)
       → aha::utils::download_model(model_id, save_dir, max_retries).await
       → aha::utils::is_model_downloaded(WhichModel::from_str(...)) 二次确认
-  → aha_provider::ensure_model_downloaded(EMBED_MODEL_REPO, MODELS_DIR)
+  → aha_provider::ensure_model_downloaded(EMBED_MODEL, MODELS_DIR)
   → 打印 "ok: <repo> at <path> (<size>)"
 ```
 
@@ -206,7 +206,7 @@ lorag models pull
 ```
 lorag/
 ├── Cargo.toml                      # aha path 依赖；rig 0.40 走 crates.io（M3+ 才用 rig-lancedb / lancedb / rusqlite）
-├── .env.example                    # 含默认 model id + EMBED_DIM
+├── .env.example                    # 含默认 model id（EMBED_DIM 自动从模型读）
 ├── .env                            # gitignore
 ├── .env.smoke                      # gitignore；0.6B 小模型 smoke 配置
 ├── .gitignore
@@ -216,7 +216,7 @@ lorag/
 ├── src/
 │   ├── main.rs                     # ✅ CLI 入口（clap）：init / query / shell / models / sources / chat
 │   ├── lib.rs                      # ✅ 模块声明（pub mod aha_provider / config / rig_compat / rag）
-│   ├── config.rs                   # ✅ AppConfig：LLM_MODEL_REPO / EMBED_MODEL_REPO / MODELS_DIR / EMBED_DIM / ...
+│   ├── config.rs                   # ✅ AppConfig：LLM_MODEL / EMBED_MODEL / MODELS_DIR / ...
 │   ├── aha_provider.rs             # ✅ AhaClient + ensure_model_downloaded + models_status + resolve_model_path
 │   ├── rig_compat.rs               # ✅ AhaCompletionModel + AhaEmbeddingModel + message convert
 │   ├── rag.rs                      # ✅ M5 重写：手写 embed + lancedb vector_search + 拼 context + completion
@@ -256,15 +256,13 @@ lorag/
 
 | 字段 | 含义 | 默认 |
 |------|------|------|
-| `LLM_MODEL_REPO` | 模型 id（aha 用，HF/ModelScope repo 形式） | 必填 |
-| `EMBED_MODEL_REPO` | 模型 id | 必填 |
-| `LLM_MODEL_NAME` | 调 aha 时 JSON 的 `model` 字段值 | 可选，默认 = `LLM_MODEL_REPO`（一般不用改）|
-| `EMBED_MODEL_NAME` | 同上 | 可选，默认 = `EMBED_MODEL_REPO`（一般不用改）|
-| `MODELS_DIR` | 模型下载/加载目录（`aha::utils::download_model` 下到 `<MODELS_DIR>/<MODEL_REPO>/`） | `./data/models` |
+| `LLM_MODEL` | LLM 模型 id（aha 用，HF/ModelScope repo 形式） | 必填 |
+| `EMBED_MODEL` | Embedding 模型 id | 必填 |
+| `MODELS_DIR` | 模型下载/加载目录（`aha::utils::download_model` 下到 `<MODELS_DIR>/<MODEL>/`） | `./data/models` |
 | `DOWNLOAD_MAX_RETRIES` | `aha::utils::download_model` 的重试次数 | `3` |
 | `LANCEDB_DIR` | lancedb 数据目录 | `./data/lancedb` |
 | `SQLITE_PATH` | sqlite 文件路径 | `./data/lorag.db` |
-| `EMBED_DIM` | 向量维度，建表时强校验 | 必填（如 384 for all-MiniLM） |
+| `EMBED_DIM` | **已废弃** | 从 `embedding 模型 config.json::hidden_size` 自动读出，**不用配** |
 | `CHUNK_SIZE` | chunk 字符上限 | `500` |
 | `CHUNK_OVERLAP` | chunk 滑动窗口重叠 | `50` |
 | `TOP_K` | 检索 top_k | `5` |
@@ -591,7 +589,7 @@ pub async fn ensure_hnsw_index(table: &lancedb::Table) -> Result<()> {
   - `source_path: Utf8`
   - `chunk_ordinal: Int64`
   - `text: Utf8`
-  - `embedding: FixedSizeList<Float32, EMBED_DIM>`
+  - `embedding: FixedSizeList<Float64, N>` —— N 从 `AhaClient.embed_dim()` 拿，Float64 跟 aha embed 输出对齐
 - MVP 用 `LanceDbVectorIndex::new(table, embed_model, "id", SearchParams::default())` 包装
 - 数据量小直接 ENN（exact），不建 ANN 索引
 
@@ -729,13 +727,8 @@ $env:LORAG_ENV = ".env.smoke"    # 0.6B 配置
 #   - Qwen/Qwen3-Embedding-0.6B  → 1024 维
 #   - Qwen/Qwen3-Embedding-4B    → 2560 维
 #   - Qwen/Qwen3-Embedding-8B    → 4096 维
-LLM_MODEL_REPO=Qwen/Qwen3-4B
-EMBED_MODEL_REPO=sentence-transformers/all-MiniLM-L6-v2
-
-# ----- 调 aha 时 JSON 的 model 字段值（可选）-----
-# 默认 = 上面 MODEL_REPO 的值（lorag 启动时自动 fallback），一般不用改
-# LLM_MODEL_NAME=...
-# EMBED_MODEL_NAME=...
+LLM_MODEL=Qwen/Qwen3-4B
+EMBED_MODEL=sentence-transformers/all-MiniLM-L6-v2
 
 # ----- 模型下载位置（aha::utils::download_model 的 save_dir）-----
 MODELS_DIR=./data/models
@@ -744,12 +737,9 @@ MODELS_DIR=./data/models
 DOWNLOAD_MAX_RETRIES=3
 
 # ----- 向量维度 -----
-# 跟你的 embedding 模型输出维度必须一致！
-#   sentence-transformers/all-MiniLM-L6-v2 = 384
-#   Qwen/Qwen3-Embedding-0.6B              = 1024
-#   Qwen/Qwen3-Embedding-4B                = 2560
-#   Qwen/Qwen3-Embedding-8B                = 4096
-EMBED_DIM=384
+# **不用配**。lorag 启动时从 embedding 模型的 config.json::hidden_size 自动读出来。
+# lancedb schema 跟模型走；改 EMBED_MODEL 后**清掉数据库重建**：
+#   rm -rf data/lancedb data/lorag.db
 
 # ----- 数据库路径 -----
 LANCEDB_DIR=./data/lancedb
@@ -821,7 +811,7 @@ incremental = true
 3. **单进程内存叠加**：LLM 4B（~8GB FP16）+ Embedding 0.6B（~1.5GB）≈ 10GB RAM，机器要够。
 4. **`ModelInstance<'static>` 内存 leak**：`string_to_static_str` 会 leak 两个 path 字符串（每次启动 ~100 字节），可接受。
 5. **`stream()` unimplemented**：MVP 阶段 `CompletionModel::stream` 暂时 panic。后续加流式要参考 aha 的 `stream_completion`。
-6. **EMBED_DIM 与模型不匹配**：all-MiniLM = 384，Qwen3-Embedding-0.6B = 1024。维度硬编码在 schema，改模型时**必须改 EMBED_DIM 并重建 lancedb**（`rm -rf data/lancedb`）。
+6. **换 embedding 模型要清数据库**：维度硬编码在 lancedb schema，换 `EMBED_MODEL` 时**必须重建 lancedb + sqlite**（`rm -rf data/lancedb data/lorag.db`，前者 schema 不匹配，后者 chunks 表 UNIQUE 约束撞索引）。
 7. **大文档性能**：MVP 同步摄入，超大文件（>100MB）可能 OOM，后续做流式。
 8. **PDF 解析**：`pdf-extract` 对扫描版 PDF 无效，扫描版得 OCR（aha 本身有 OCR 模型，后续迭代）。
 9. **xlsx 多 sheet**：MVP 把所有 sheet 文本拼一起，不保留表结构。

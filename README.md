@@ -46,17 +46,19 @@ lorag query "文档里讲了什么？"
 
 默认模型（写在小机器上能跑的 0.6B 配置；想用更大模型自己改 `.env`）：
 - LLM：`Qwen/Qwen3-0.6B`（小，CPU 也能跑；想要更好回答换 `Qwen3-1.7B` / `4B`）
-- Embedding：`Qwen/Qwen3-Embedding-0.6B`（1024 维，质量比 MiniLM 显著好）
+- Embedding：`Qwen/Qwen3-Embedding-0.6B`（1024 维，质量比 MiniLM 显著好；维度自动读，不用配）
 
 完整支持的模型列表见 [aha supported-models.zh-CN.md](https://github.com/jhqxxx/aha/blob/main/docs/supported-models.zh-CN.md)。
 
-**换 embedding 模型**（或任何会让 `EMBED_DIM` 变的改动）：
-1. 改 `.env` 里的 `EMBED_MODEL_REPO` 和 `EMBED_DIM`
+**换 embedding 模型**（会让向量维度变）：
+1. 改 `.env` 里的 `EMBED_MODEL`
 2. 跑 `lorag models pull`（下新模型）
 3. **`rm -rf data/lancedb data/lorag.db`**（**两个都要删**——lancedb 的向量维度硬编码在 schema；sqlite 的 `chunks` 表有 `UNIQUE(source_id, ordinal)` 约束，旧 chunks 不删重 ingest 会撞唯一索引）
 4. `lorag ingest <path>` 重新摄入
 
-只换 LLM（不改 embedding）不用清数据库——只更新 `LLM_MODEL_REPO` + `lorag models pull` 就行。
+> 向量维度不需要手动配——`lorag` 启动时自动从 embedding 模型的 `config.json::hidden_size` 读出来。
+
+只换 LLM（不改 embedding）不用清数据库——只更新 `LLM_MODEL` + `lorag models pull` 就行。
 
 ## 🛠️ 编译 / Build
 

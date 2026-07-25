@@ -177,56 +177,40 @@ fn check_config(checks: &mut Vec<Check>, _cfg: &AppConfig) {
             "config",
             ".env file",
             format!("not found at {}", env_path.display()),
-            "cp .env.example .env (then edit LLM_MODEL_REPO / EMBED_MODEL_REPO as needed)",
+            "cp .env.example .env (then edit LLM_MODEL / EMBED_MODEL as needed)",
         ));
     }
 
-    // 2. LLM_MODEL_REPO 非空
+    // 2. LLM_MODEL 非空
     // cfg 加载时已经强校验了，这里再保险一次（如果 cfg 加载过了，字段肯定非空）
-    if _cfg.llm_model_repo.is_empty() {
+    if _cfg.llm_model.is_empty() {
         checks.push(Check::fail(
             "config",
-            "LLM_MODEL_REPO",
+            "LLM_MODEL",
             "empty (required)",
-            "set LLM_MODEL_REPO in .env, e.g. LLM_MODEL_REPO=Qwen/Qwen3-0.6B",
+            "set LLM_MODEL in .env, e.g. LLM_MODEL=Qwen/Qwen3-0.6B",
         ));
     } else {
         checks.push(Check::pass(
             "config",
-            "LLM_MODEL_REPO",
-            format!("{:?}", _cfg.llm_model_repo),
+            "LLM_MODEL",
+            format!("{:?}", _cfg.llm_model),
         ));
     }
 
-    // 3. EMBED_MODEL_REPO 非空
-    if _cfg.embed_model_repo.is_empty() {
+    // 3. EMBED_MODEL 非空
+    if _cfg.embed_model.is_empty() {
         checks.push(Check::fail(
             "config",
-            "EMBED_MODEL_REPO",
+            "EMBED_MODEL",
             "empty (required)",
-            "set EMBED_MODEL_REPO in .env, e.g. EMBED_MODEL_REPO=Qwen/Qwen3-Embedding-0.6B",
+            "set EMBED_MODEL in .env, e.g. EMBED_MODEL=Qwen/Qwen3-Embedding-0.6B",
         ));
     } else {
         checks.push(Check::pass(
             "config",
-            "EMBED_MODEL_REPO",
-            format!("{:?}", _cfg.embed_model_repo),
-        ));
-    }
-
-    // 4. EMBED_DIM 合理
-    if _cfg.embed_dim == 0 {
-        checks.push(Check::fail(
-            "config",
-            "EMBED_DIM",
-            format!("{} (must be > 0)", _cfg.embed_dim),
-            "set EMBED_DIM in .env to match your embedding model's output dim (MiniLM=384, Qwen3-Embedding-0.6B=1024, ...)",
-        ));
-    } else {
-        checks.push(Check::pass(
-            "config",
-            "EMBED_DIM",
-            format!("{} (must match your embedding model)", _cfg.embed_dim),
+            "EMBED_MODEL",
+            format!("{:?}", _cfg.embed_model),
         ));
     }
 }
@@ -267,46 +251,30 @@ fn check_models(checks: &mut Vec<Check>, cfg: &AppConfig) {
             checks.push(Check::fail(
                 "models",
                 format!("{label} ({})", status.repo),
-                format!("not found locally (expected at {})", status.expected_path.display()),
+                format!(
+                    "not found locally (expected at {})",
+                    status.expected_path.display()
+                ),
                 "run `lorag models pull` to download",
             ));
         }
     }
 
-    // 额外检查 embedding 模型：如果存在就读 config.json 拿 hidden_size，跟 EMBED_DIM 对一下
-    // 跟 AhaClient::init 一样的检查，doctor 提前告诉用户避免启动时才发现
-    if let Some(embed_path) = resolve_model_path(&cfg.embed_model_repo, &cfg.models_dir) {
-        match read_hidden_size_from_config(&embed_path) {
-            Some(actual) if actual != cfg.embed_dim => {
-                checks.push(Check::fail(
-                    "models",
-                    "EMBED_DIM ↔ embedding model",
-                    format!(
-                        ".env EMBED_DIM={} but `{}` outputs {}-dim vectors",
-                        cfg.embed_dim, cfg.embed_model_repo, actual
-                    ),
-                    format!(
-                        "set EMBED_DIM={} in .env (or change EMBED_MODEL_REPO), then \
-                         rm -rf data/lancedb data/lorag.db && lorag ingest <path>",
-                        actual
-                    ),
-                ));
-            }
-            Some(actual) => {
-                checks.push(Check::pass(
-                    "models",
-                    "EMBED_DIM ↔ embedding model",
-                    format!(
-                        "EMBED_DIM={} matches `{}` hidden_size",
-                        actual, cfg.embed_model_repo
-                    ),
-                ));
-            }
-            None => {
-                // 读不到 config.json（可能是非 HF 格式），silently skip
-            }
-        }
+    // 额外：读 embedding 模型 config.json 拿 hidden_size，作为信息项展示
+    // （不再跟 EMBED_DIM 比对——EMBED_DIM 配置项已删，lancedb schema 跟模型走）
+    if let Some(embed_path) = resolve_model_path(&cfg.embed_model, &cfg.models_dir)
+        && let Some(actual) = read_hidden_size_from_config(&embed_path)
+    {
+        checks.push(Check::pass(
+            "models",
+            "embedding model dim",
+            format!(
+                "{} outputs {}-dim vectors (lancedb schema will use this)",
+                cfg.embed_model, actual
+            ),
+        ));
     }
+    // 读不到 config.json：silently skip（非 HF 格式）
 }
 
 fn dir_size_mb(path: &Path) -> f64 {
@@ -337,14 +305,15 @@ fn walkdir_size(path: &Path) -> std::io::Result<u64> {
 
 fn check_storage(checks: &mut Vec<Check>, cfg: &AppConfig) {
     // 1. MODELS_DIR 可写
-    check_dir_writable(checks, "MODELS_DIR", &cfg.models_dir, /* must_exist */ true);
+    check_dir_writable(
+        checks,
+        "MODELS_DIR",
+        &cfg.models_dir,
+        /* must_exist */ true,
+    );
 
     // 2. LANCEDB_DIR —— 不存在是 OK（run ingest 会创建），但父目录要可写
-    check_dir_or_parent_writable(
-        checks,
-        "LANCEDB_DIR",
-        &cfg.lancedb_dir,
-    );
+    check_dir_or_parent_writable(checks, "LANCEDB_DIR", &cfg.lancedb_dir);
 
     // 3. SQLITE_PATH 父目录可写
     if let Some(parent) = cfg.sqlite_path.parent() {
@@ -353,10 +322,18 @@ fn check_storage(checks: &mut Vec<Check>, cfg: &AppConfig) {
             checks.push(Check::pass(
                 "storage",
                 "SQLITE_PATH parent",
-                format!("CWD (sqlite will create {} here)", cfg.sqlite_path.display()),
+                format!(
+                    "CWD (sqlite will create {} here)",
+                    cfg.sqlite_path.display()
+                ),
             ));
         } else {
-            check_dir_writable(checks, "SQLITE_PATH parent", parent, /* must_exist */ true);
+            check_dir_writable(
+                checks,
+                "SQLITE_PATH parent",
+                parent,
+                /* must_exist */ true,
+            );
         }
     }
 
@@ -373,7 +350,10 @@ fn check_storage(checks: &mut Vec<Check>, cfg: &AppConfig) {
             checks.push(Check::warn(
                 "storage",
                 "LanceDB documents table",
-                format!("lancedb dir exists but documents table not found at {}", docs_lance.display()),
+                format!(
+                    "lancedb dir exists but documents table not found at {}",
+                    docs_lance.display()
+                ),
                 "run `lorag ingest <path>` to create the table and add documents",
             ));
         }
@@ -400,7 +380,10 @@ fn check_dir_writable(checks: &mut Vec<Check>, name: &str, path: &Path, must_exi
             checks.push(Check::warn(
                 "storage",
                 name,
-                format!("does not exist (will be created on first write): {}", path.display()),
+                format!(
+                    "does not exist (will be created on first write): {}",
+                    path.display()
+                ),
                 "no action needed; just be aware",
             ));
         }
@@ -453,7 +436,10 @@ fn check_dir_or_parent_writable(checks: &mut Vec<Check>, name: &str, path: &Path
         checks.push(Check::warn(
             "storage",
             format!("{name} (or any parent)"),
-            format!("no existing ancestor directory found for {}", path.display()),
+            format!(
+                "no existing ancestor directory found for {}",
+                path.display()
+            ),
             "create a parent directory or fix the path in .env",
         ));
     }

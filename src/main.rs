@@ -256,7 +256,7 @@ async fn cmd_query(cfg: &config::AppConfig, question: String, top_k: Option<usiz
 }
 
 async fn cmd_models_pull(cfg: &config::AppConfig) -> Result<()> {
-    let targets = [cfg.llm_model_repo.clone(), cfg.embed_model_repo.clone()];
+    let targets = [cfg.llm_model.clone(), cfg.embed_model.clone()];
     for repo in targets {
         println!("pulling {repo} → {}/", cfg.models_dir.display());
         let p =
@@ -272,7 +272,7 @@ async fn cmd_models_pull(cfg: &config::AppConfig) -> Result<()> {
 async fn cmd_models_status(cfg: &config::AppConfig, do_init: bool) -> Result<()> {
     println!("lorag model status");
     println!("  MODELS_DIR = {}", cfg.models_dir.display());
-    println!("  EMBED_DIM  = {}", cfg.embed_dim);
+    println!("  (embedding dim auto-detected from model config.json on load)");
     println!();
     let statuses = aha_provider::models_status(cfg).context("failed to query model status")?;
     aha_provider::print_models_status(&statuses);
@@ -333,8 +333,8 @@ async fn cmd_shell(
 
     println!();
     println!("ready:");
-    println!("  LLM       : {}", cfg.llm_model_repo);
-    println!("  Embedding : {}", cfg.embed_model_repo);
+    println!("  LLM       : {}", cfg.llm_model);
+    println!("  Embedding : {}", cfg.embed_model);
     if no_rag {
         println!("  RAG       : disabled (--no-rag)");
     } else {
@@ -449,9 +449,9 @@ fn print_shell_help() {
 
 fn print_shell_status(cfg: &config::AppConfig, k: usize, no_rag: bool) {
     println!("status:");
-    println!("  LLM repo        : {}", cfg.llm_model_repo);
-    println!("  Embedding repo  : {}", cfg.embed_model_repo);
-    println!("  Embedding dim   : {}", cfg.embed_dim);
+    println!("  LLM             : {}", cfg.llm_model);
+    println!("  Embedding       : {}", cfg.embed_model);
+    println!("  (dim auto-detected at load time)");
     println!("  Models dir      : {}", cfg.models_dir.display());
     println!("  LanceDB dir     : {}", cfg.lancedb_dir.display());
     println!("  SQLite path     : {}", cfg.sqlite_path.display());

@@ -330,3 +330,17 @@ config ──┬──→ aha_provider ─────┐    （aha lib 适配 +
 - 报错优先自查 `AGENTS.md` 的"禁止事项"和"常见任务工作流"，不要重复问相同问题。
 - 用户没说要 chat / web UI / streaming 时**不要**自作主张加。
 - 本项目只调 aha crate 库 API，**不**调 aha CLI 二进制（任何要 spawn `aha ...` 子进程的方案都是错的）。
+
+### 9.1 Git commit / push 规则（重要）
+
+- **绝不**未经用户明确同意就 `git commit` 或 `git push`。
+- 改完代码后默认行为：**展示 `git status` / `git diff --stat` 给用户看，明确说"可以 commit 吗 / 要不要 push 到 codeberg"，等用户点头再动**。
+- 哪怕用户之前说过"做完就提交"——只要这一轮**没有显式确认**当前这批改动，就还是 ask。
+- 例外：**只**在以下情况可以自动 commit（仍然不自动 push）：
+  - 用户在当条消息里写"提交" / "commit" / "commit 一下" 等明确动词。
+- 例外：push **永远** ask，没有任何捷径。
+- 触发场景：
+  - 任务完成时
+  - 中间需要"先 commit 一下避免丢"时（仍然 ask；用户可以拒绝）
+  - 想要"留个检查点"时（仍然 ask）
+- 违规成本：会污染 codeberg 上的 commit 历史，撤销成本高。**默认保守，宁可多问一次**。

@@ -35,7 +35,11 @@ pub async fn run_ingest(
     let sqlite = SqliteStore::open(&cfg.sqlite_path)
         .with_context(|| format!("failed to open sqlite at {}", cfg.sqlite_path.display()))?;
 
-    let table = lancedb_store::ensure_table(&cfg.lancedb_dir, cfg.embed_dim)
+    // lancedb 表维度跟 embedding 模型走（不再从 .env 读 EMBED_DIM）
+    let embed_dim = client.embed_dim().context(
+        "AhaClient has no embed_dim (model failed to expose dim; run `lorag doctor` to debug)",
+    )?;
+    let table = lancedb_store::ensure_table(&cfg.lancedb_dir, embed_dim)
         .await
         .context("failed to ensure lancedb documents table")?;
 
@@ -114,7 +118,7 @@ async fn ingest_one(
     }
 
     // 5. 批量 embed —— 直接用 embedding_model 的 batch embed
-    let embed_model = client.embedding_model(&cfg.embed_model_name);
+    let embed_model = client.embedding_model(&cfg.embed_model);
     let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
     let embeddings = embed_model
         .embed_texts(texts)
@@ -124,8 +128,11 @@ async fn ingest_one(
     // 直接取 Embedding.vec（已是 Vec<f64>，跟 lancedb Float64 schema 一致）
     let vecs: Vec<Vec<f64>> = embeddings.iter().map(|emb| emb.vec.clone()).collect();
 
-    // 6. 写 lancedb
-    lancedb_store::insert_batch(table, &chunks, &hash, vecs, cfg.embed_dim).await?;
+    // 6. 写 lancedb（dim 来自 AhaClient.loaded 模型，不再从 cfg 读）
+    let embed_dim = client
+        .embed_dim()
+        .context("AhaClient has no embed_dim (model failed to expose dim); this is a bug")?;
+    lancedb_store::insert_batch(table, &chunks, &hash, vecs, embed_dim).await?;
 
     // 6.5 数据量够了就建 HNSW 索引；不够 silently 跳过（< 256 行）
     //    失败不阻塞 ingest —— index 可以后续手动重试

@@ -69,7 +69,7 @@ pub async fn rag_query(
 ///
 /// `lorag shell --no-rag` 和 fallback 路径都用这个。
 pub async fn bare_llm_query(client: &AhaClient, cfg: &AppConfig, question: &str) -> Result<String> {
-    let llm_model = client.completion_model(&cfg.llm_model_name);
+    let llm_model = client.completion_model(&cfg.llm_model);
     let req = CompletionRequest {
         preamble: Some("你是一个简洁的助手，用一两句话直接回答问题。".to_string()),
         chat_history: OneOrMany::one(Message::user(question)),
@@ -137,17 +137,20 @@ async fn try_rag_with_lancedb(
     top_k: usize,
 ) -> Result<String> {
     // ── 1. embed question（rig Embedding.vec 是 Vec<f64>）──
-    let embed_model = client.embedding_model(&cfg.embed_model_name);
+    let embed_model = client.embedding_model(&cfg.embed_model);
     let question_embedding = embed_model
         .embed_text(question)
         .await
         .map_err(|e| anyhow::anyhow!("failed to embed question: {e}"))?;
     let question_f32: Vec<f32> = question_embedding.vec.iter().map(|f| *f as f32).collect();
-    if question_f32.len() != cfg.embed_dim {
+    // 防御：模型实际返回的 dim 跟 AhaClient 存的 dim 不一致 = aha 出 bug 了
+    if let Some(expected) = client.embed_dim()
+        && question_f32.len() != expected
+    {
         anyhow::bail!(
-            "question embedding dim {} != configured EMBED_DIM {} (run `lorag models status` to verify)",
+            "question embedding dim {} != model dim {} (aha / candle 异常，模型可能加载坏了)",
             question_f32.len(),
-            cfg.embed_dim
+            expected
         );
     }
 
@@ -221,7 +224,7 @@ async fn try_rag_with_lancedb(
         .collect::<Vec<_>>()
         .join("\n\n");
 
-    let llm_model = client.completion_model(&cfg.llm_model_name);
+    let llm_model = client.completion_model(&cfg.llm_model);
     let preamble = format!(
         "你是一个本地 RAG 助手，仅根据下面的【上下文】回答问题。\n\
          如果上下文无法覆盖问题，请直接说\"未在文档中找到相关信息\"，不要编造。\n\n\
