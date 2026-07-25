@@ -1,13 +1,14 @@
 # lorag — 本地 Agent RAG 项目规划
 
-> 状态：**M0–M5 已完成；M6+ 待办**。
+> 状态：**M0–M5 已完成；`lorag doctor` 已实装；M6 smoke test 待办**。
 > - M0 CLI 骨架 + config：✅ `lorag --help` / `lorag models status` 跑通
 > - M1 `AhaClient::init` 实装 load_model：✅ 0.6B 端到端 load 成功（4B 8GB+ 等用户手动验证）
 > - M2 文档 loaders：✅ pdf / docx / pptx / xlsx / md / txt 6 种
 > - M3 摄入 pipeline：✅ chunker + lancedb_store + sqlite_store
 > - M4 rig 0.40 provider 适配：✅ `lorag query "1+1=?"` 拿到 `"1 + 1 = 2"`（via rig CompletionModel）
 > - M5 RAG 端到端：✅ **重写绕开 `dynamic_context` 的 62GB 内存 bug**；`lorag query` / `lorag shell` 都跑通
-> - 待办：M6 (smoke 测试) / `lorag doctor` 诊断 / README 完善
+> - `lorag doctor`：✅ 诊断命令（env / models / storage / build features，11 项检查）
+> - 待办：M6 smoke test
 >
 > 后续功能（chat REPL 流式、多用户、混合检索、re-rank、ANN 索引）会在 `## 后续迭代` 一节追加。
 

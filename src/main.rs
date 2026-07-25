@@ -104,6 +104,9 @@ enum Command {
         #[arg(long, short)]
         message: Option<String>,
     },
+
+    /// 诊断环境：检查 .env / 模型文件 / 存储路径 / 编译 feature
+    Doctor,
 }
 
 #[derive(Debug, Subcommand)]
@@ -191,6 +194,7 @@ fn run(cli: Cli) -> Result<()> {
                 SourcesAction::List { json } => cmd_sources_list(&cfg, json).await,
             },
             Command::Chat { message } => cmd_chat(message).await,
+            Command::Doctor => cmd_doctor(&cfg),
         }
     })
 }
@@ -505,4 +509,19 @@ async fn cmd_chat(message: Option<String>) -> Result<()> {
         .as_deref()
         .unwrap_or("(no message provided; use --message)");
     anyhow::bail!("`lorag chat` is a placeholder in MVP (M7 计划实装). got: {msg:?}")
+}
+
+/// `lorag doctor` —— 诊断环境。
+///
+/// 检查 .env / 模型文件 / 存储路径 / 编译 feature。
+/// 不做破坏性操作（不 load 模型、不改文件），只读 + 写探针测可写性。
+/// exit 0 表示无 FAIL，exit 1 表示至少一个 FAIL。
+fn cmd_doctor(cfg: &config::AppConfig) -> Result<()> {
+    use lorag::doctor;
+    let checks = doctor::run_checks(cfg);
+    let summary = doctor::print_checks(&checks);
+    if summary.fail > 0 {
+        std::process::exit(1);
+    }
+    Ok(())
 }

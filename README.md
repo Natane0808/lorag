@@ -108,6 +108,7 @@ lorag shell                  # REPL：循环 query（init 一次不重 load）
 lorag sources list           # 列出已摄入文件
     --json
 lorag chat                   # M7 计划：真多轮对话（占位 stub）
+lorag doctor                 # ✅ 诊断环境：.env / 模型 / 存储 / 编译 feature（全 PASS exit 0）
 ```
 
 ## 🧠 工作原理 / How It Works
@@ -176,7 +177,7 @@ lorag/
 
 - ✅ M0–M5：CLI / aha 加载 / 6 种 loader / chunker / SQLite / LanceDB / RAG 端到端
 - 🚧 M6：smoke test
-- 🚧 `lorag doctor`：诊断命令（环境检查、模型完整性、lancedb 状态）
+- ✅ `lorag doctor`：诊断命令（环境检查、模型完整性、lancedb 状态）
 - 🚧 README 完善 + 一键 release 脚本
 - 📋 M7：`lorag chat` 真多轮 + 持久化历史（届时 `lorag shell` 标 deprecated）
 - 📋 流式输出（aha 支持 SSE）

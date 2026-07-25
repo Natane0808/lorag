@@ -10,6 +10,7 @@
 pub mod aha_provider;
 pub mod chunker;
 pub mod config;
+pub mod doctor;
 pub mod ingest;
 pub mod models;
 pub mod rag;
