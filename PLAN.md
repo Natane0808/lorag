@@ -258,8 +258,8 @@ lorag/
 |------|------|------|
 | `LLM_MODEL_REPO` | 模型 id（aha 用，HF/ModelScope repo 形式） | 必填 |
 | `EMBED_MODEL_REPO` | 模型 id | 必填 |
-| `LLM_MODEL_NAME` | 调 aha 时 JSON 的 `model` 字段值 | 默认 = `LLM_MODEL_REPO` |
-| `EMBED_MODEL_NAME` | 同上 | 默认 = `EMBED_MODEL_REPO` |
+| `LLM_MODEL_NAME` | 调 aha 时 JSON 的 `model` 字段值 | 可选，默认 = `LLM_MODEL_REPO`（一般不用改）|
+| `EMBED_MODEL_NAME` | 同上 | 可选，默认 = `EMBED_MODEL_REPO`（一般不用改）|
 | `MODELS_DIR` | 模型下载/加载目录（`aha::utils::download_model` 下到 `<MODELS_DIR>/<MODEL_REPO>/`） | `./data/models` |
 | `DOWNLOAD_MAX_RETRIES` | `aha::utils::download_model` 的重试次数 | `3` |
 | `LANCEDB_DIR` | lancedb 数据目录 | `./data/lancedb` |
@@ -732,10 +732,10 @@ $env:LORAG_ENV = ".env.smoke"    # 0.6B 配置
 LLM_MODEL_REPO=Qwen/Qwen3-4B
 EMBED_MODEL_REPO=sentence-transformers/all-MiniLM-L6-v2
 
-# ----- 调 aha 时 JSON 的 model 字段值 -----
-# 默认 = 上面 MODEL_REPO 的值，可以省略不写
-LLM_MODEL_NAME=Qwen/Qwen3-4B
-EMBED_MODEL_NAME=sentence-transformers/all-MiniLM-L6-v2
+# ----- 调 aha 时 JSON 的 model 字段值（可选）-----
+# 默认 = 上面 MODEL_REPO 的值（lorag 启动时自动 fallback），一般不用改
+# LLM_MODEL_NAME=...
+# EMBED_MODEL_NAME=...
 
 # ----- 模型下载位置（aha::utils::download_model 的 save_dir）-----
 MODELS_DIR=./data/models
