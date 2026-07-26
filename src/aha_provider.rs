@@ -18,9 +18,11 @@ use tokio::sync::Mutex;
 use aha::models::common::embedding::TextEmbedding;
 use aha::models::common::model_mapping::WhichModel;
 use aha::models::{GenerateModel, ModelInstance, load_model};
-use aha::params::chat::ChatCompletionParameters;
-use aha::params::chat::ChatCompletionResponse;
+use aha::params::chat::{
+    ChatCompletionParameters, ChatCompletionResponse, ChatMessageContent, DeltaChatMessage,
+};
 use aha::utils::string_to_static_str;
+use futures::StreamExt;
 
 use crate::config::AppConfig;
 
@@ -456,6 +458,70 @@ impl AhaClient {
             .context("aha LLM generate failed")
     }
 
+    /// LLM 流式推理：candle 同步 generate_stream + channel bridge。
+    ///
+    /// aha 的 [`GenerateModel::generate_stream`] 返回的 stream 生命周期绑定到 `&mut self`，
+    /// 不能从 `spawn_blocking` 返回。走 channel bridge：
+    /// 1. `spawn_blocking` 内 `blocking_lock` 拿到 `&mut ModelInstance`
+    /// 2. 调 `generate_stream(params)`
+    /// 3. `rt.block_on()` 在同步上下文 poll 异步 stream
+    /// 4. 每个 chunk 通过 `mpsc::channel` 发给调用方
+    ///
+    /// 返回的 `Receiver` 逐 token 产出 `Result<String>`。
+    /// 流结束或被中断时 Receiver 自动 close。
+    pub async fn llm_generate_stream(
+        &self,
+        params: ChatCompletionParameters,
+    ) -> Result<tokio::sync::mpsc::Receiver<Result<String>>> {
+        let llm = self.llm.as_ref().ok_or_else(|| {
+            anyhow!(
+                "AhaClient has no LLM loaded (was created via init_embed_only); \
+                 call `init` (loads both LLM + embedding) instead of `init_embed_only`"
+            )
+        })?;
+        let llm = llm.clone();
+        // buffer 64 个 token，足够覆盖 candle 生成速度与 CLI 消费速度的差异
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+
+        tokio::task::spawn_blocking(move || {
+            let mut guard = llm.blocking_lock();
+            let mut stream = match guard.generate_stream(params) {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = tx.blocking_send(Err(anyhow!("aha generate_stream failed: {e}")));
+                    return;
+                }
+            };
+
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(async {
+                while let Some(chunk_result) = stream.next().await {
+                    match chunk_result {
+                        Ok(chunk) => {
+                            for choice in &chunk.choices {
+                                if let DeltaChatMessage::Assistant {
+                                    content: Some(c), ..
+                                } = &choice.delta
+                                    && let Some(text) = aha_chunk_text(c)
+                                    && !text.is_empty()
+                                    && tx.send(Ok(text)).await.is_err()
+                                {
+                                    return; // receiver dropped，调用方不需要更多 token
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Err(anyhow!("stream error: {e}"))).await;
+                            return;
+                        }
+                    }
+                }
+            });
+        });
+
+        Ok(rx)
+    }
+
     /// Embedding 推理：candle 同步，包装成 async + spawn_blocking。
     ///
     /// M4 阶段会变成 `AhaEmbeddingModel::embed_texts` 的实现。
@@ -574,6 +640,24 @@ impl AhaClient {
         .await
         .context("rerank task panicked")?
         .context("aha rerank failed")
+    }
+}
+
+/// 从 aha stream chunk 的 [`ChatMessageContent`] 提取纯文本。
+fn aha_chunk_text(content: &ChatMessageContent) -> Option<String> {
+    match content {
+        ChatMessageContent::Text(s) => Some(s.clone()),
+        ChatMessageContent::ContentPart(parts) => {
+            let s: String = parts
+                .iter()
+                .filter_map(|p| match p {
+                    aha::params::chat::ChatMessageContentPart::Text(t) => Some(t.text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            if s.is_empty() { None } else { Some(s) }
+        }
+        ChatMessageContent::None => None,
     }
 }
 

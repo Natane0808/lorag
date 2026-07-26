@@ -48,13 +48,16 @@ pub fn extract(path: &Path) -> Result<String> {
             continue;
         }
 
-        // 第一个 sheet 不需要前缀，后续 sheet 加 sheet 名标识
-        if !output.is_empty() {
-            output.push('\n');
-        }
-        if sheet_names.len() > 1 {
+        // 多 sheet 时给每行加 [SheetName] 前缀，确保 chunk 切分后数据行仍带 sheet 上下文。
+        let row_prefix = if sheet_names.len() > 1 {
+            if !output.is_empty() {
+                output.push('\n');
+            }
             output.push_str(&format!("--- Sheet: {} ---\n", sheet_name));
-        }
+            format!("[{}] ", sheet_name)
+        } else {
+            String::new()
+        };
 
         let rows = range.rows();
         for row in rows {
@@ -64,7 +67,7 @@ pub fn extract(path: &Path) -> Result<String> {
                 .filter(|s| !s.is_empty())
                 .collect();
             if !row_text.is_empty() {
-                writeln!(&mut sheet_text, "{}", row_text.join("\t")).unwrap();
+                writeln!(&mut sheet_text, "{}{}", row_prefix, row_text.join("\t")).unwrap();
             }
         }
 

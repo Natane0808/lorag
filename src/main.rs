@@ -353,14 +353,44 @@ async fn cmd_query(
         );
     }
 
-    println!("searching top-{} chunks for: {question:?}", k);
-    let answer = rag::rag_query(&client, cfg, &question, k, enable_rerank, rn)
+    println!("searching top-{k} chunks for: {question:?}");
+
+    // 1. 检索 chunks + 构建 preamble（复制 rag_query 逻辑，但不调 LLM）
+    let preamble = match rag::retrieve_chunks(&client, cfg, &question, k, enable_rerank, rn).await {
+        Ok(chunks) => {
+            let context = rag::format_chunks_for_context(&chunks);
+            rag::build_rag_preamble(cfg, &context)
+        }
+        Err(e) => {
+            let s = format!("{e:#}");
+            if rag::is_recoverable_error(&s) {
+                eprintln!("(RAG unavailable: {s})");
+                eprintln!("(hint: run `lorag ingest <path>` to enable retrieval)");
+                eprintln!("(falling back to bare LLM)");
+                cfg.prompt_bare_llm.clone()
+            } else {
+                return Err(e);
+            }
+        }
+    };
+
+    // 2. 流式推理
+    let mut rx = rag::llm_complete_stream(&client, cfg, preamble, &question)
         .await
-        .context("rag query failed")?;
+        .context("stream LLM completion failed")?;
 
     println!();
     println!("=== ANSWER ===");
-    println!("{answer}");
+    while let Some(result) = rx.recv().await {
+        match result {
+            Ok(token) => print!("{token}"),
+            Err(e) => {
+                eprintln!("\nstream error: {e}");
+                break;
+            }
+        }
+    }
+    println!();
     println!("=== END ===");
     Ok(())
 }
@@ -537,7 +567,7 @@ async fn cmd_chat(
         )
         .await
         {
-            Ok(answer) => println!("\n{answer}\n"),
+            Ok(_) => println!(), // answer 已流式打印；空行分隔
             Err(e) => eprintln!("error: {e:#}"),
         }
         return Ok(());
@@ -619,7 +649,7 @@ async fn cmd_chat(
         )
         .await
         {
-            Ok(answer) => println!("\n{answer}\n"),
+            Ok(_) => println!(), // answer 已流式打印；空行分隔下一轮
             Err(e) => eprintln!("error: {e:#}"),
         }
     }
@@ -642,7 +672,7 @@ async fn run_chat_turn(
 ) -> Result<String> {
     use lorag::rag;
 
-    print!("(thinking... ");
+    print!("(");
     let _ = std::io::Write::flush(&mut std::io::stdout());
     let start = std::time::Instant::now();
 
@@ -677,13 +707,26 @@ async fn run_chat_turn(
     };
 
     // 3. 拼 preamble（history + context）
-    let preamble = rag::build_chat_preamble(&history, &chunks);
+    let preamble = rag::build_chat_preamble(cfg, &history, &chunks);
 
-    // 4. 调 LLM
-    let answer = rag::llm_complete(client, cfg, preamble, user_msg).await?;
+    // 4. 流式 LLM（逐 token 打印 + 收集完整 answer 用于持久化）
+    let mut rx = rag::llm_complete_stream(client, cfg, preamble, user_msg).await?;
+    let mut answer = String::new();
+    while let Some(result) = rx.recv().await {
+        match result {
+            Ok(token) => {
+                print!("{token}");
+                answer.push_str(&token);
+            }
+            Err(e) => {
+                eprintln!("\nstream error: {e}");
+                break;
+            }
+        }
+    }
 
     let secs = start.elapsed().as_secs_f32();
-    println!("{secs:.1}s)");
+    println!(" ({secs:.1}s)");
 
     // 5. 持久化（user + assistant）
     if !no_history {
