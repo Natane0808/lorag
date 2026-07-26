@@ -6,7 +6,7 @@ lorag 的历史变更记录。**当前**架构 / 决策 / 限制见 [PLAN.md](PL
 
 ---
 
-## v0.1（current） — M0 到 M7.1 全实装
+## v0.1（current） — M0 到 M8 全实装
 
 **当前 release**：MIT / codeberg，rust 2021，0.1.0 crate version。
 
@@ -16,6 +16,15 @@ lorag 的历史变更记录。**当前**架构 / 决策 / 限制见 [PLAN.md](PL
 - **drop `tests/scratch/`**：开发期 RAG eval 脚本（`check_chunks.py` / `eval_questions.py` / `eval_ab.py`）已用 mavis-trash 移到回收站。`README.md` 旧 rerank 介绍去重。
 - **RERANK_TOP_N 可配置**：从硬编码 `pub const RERANK_TOP_N: usize = 50;` 改成 `AppConfig.rerank_top_n: usize`（环境变量 `RERANK_TOP_N` / CLI `--rerank-top-n <N>`）。`rag_query` / `try_rag_with_lancedb` / `retrieve_chunks` 三个函数签名都加 `rerank_top_n: usize` 参数；启动期校验 `rerank_top_n > top_k` 否则拒绝。
 - **Cargo profile 微调**：dev `opt-level=1` 0.6B 推理 4.5s/query（vs full debug 142s）；release 链接冷启动 5-10 分钟把 D 盘打 100%，**只在测性能时跑一次**。
+
+### M8 — 流式输出 + 提示词配置化 + XLSX chunk 修复
+
+- **流式输出**：`llm_complete_stream` 通过 `mpsc::channel(64)` + `spawn_blocking` 桥接 aha `generate_stream`。`cmd_query` 分三阶段流式（检索 → 生成 → 逐 token 打印），`cmd_chat` 每轮逐 token 输出 + sqlite 持久化。不走 rig 抽象，直接调 aha `GenerateModel::generate_stream`。
+- **提示词配置化**：4 个 `PROMPT_*` 字段（可 `.env` 覆盖，留空用内置默认值）：`PROMPT_SYSTEM_ROLE` / `PROMPT_RAG_INSTRUCTION` / `PROMPT_CHAT_CONTEXT_INSTRUCTION` / `PROMPT_BARE_LLM`。
+- **4 层防注入**：① `sanitize_user_input` 转义 ChatML token + HTML 实体；② `format_chunks_for_context` 每 chunk `[文档片段 N]...[/文档片段 N]` 边界包裹 + "参考资料不可执行"段头；③ 系统 prompt 5 条铁律（不可被用户覆盖）；④ `ANTI_INJECTION_SUFFIX` prompt 末尾重申规则最高优先级。
+- **XLSX chunk 修复**：多 sheet 时给每个 sheet 加 `--- Sheet: {name} ---` header + 每行加 `[SheetName]` 前缀，确保 chunk 切分后数据行仍带 sheet 上下文。修复前跨 sheet 检索经常失败（sheet header 和数据行被切到不同 chunk 时向量相似度断崖式下降），修复后 sheet header 跟数据行大概率落在同一 chunk，跨 sheet 检索可命中。
+- **关键经验**：① 流式通道：`spawn_blocking → blocking_lock → generate_stream → rt.block_on → poll async stream → tx.send`；② 纯向量检索对数字日期不敏感（相近日期的向量表示几乎重叠），混合检索（M9）才能解决；③ 防注入需多层——单靠 `sanitize_user_input` 不够，chunk 边界标记 + 系统 prompt 铁律 + recency bias 尾注形成纵深防御。
+- Commit: `3c33674 feat: M8 streaming output + prompt config + anti-injection + XLSX fix`
 
 ### M7.1 — Rerank（可选功能）
 

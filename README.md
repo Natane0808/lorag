@@ -22,7 +22,7 @@
 - **可选 rerank**：配 `RERANK_MODEL=` 即启用（aha `Qwen3-Reranker-0.6B`），召回 +15-25%
 - **可观测**：每步 ingestion 打印进度；query 跑出 RAG 命中 / fallback
 - **GPU 加速可选**：默认 CPU 跑；NVIDIA GPU 加 `--features cuda`
-- **明确不做**：流式输出 / Web UI / 工具调用（见 [PLAN.md §11](PLAN.md) 触发条件）
+- **明确不做**：Web UI / 工具调用（见 [PLAN.md §11](PLAN.md) 触发条件）
 
 ---
 
@@ -230,9 +230,9 @@ lorag/
 - ✅ M6：`lorag doctor` 11 项环境检查
 - ✅ M7 `lorag chat`：多轮 REPL + SQLite 历史 + RAG fallback
 - ✅ M7.1 Rerank（可选）：Qwen3-Reranker 懒加载 + `--no-rerank` + `RERANK_TOP_N` 可配
-- 📋 MCP server（把 `lorag` 暴露成 MCP tools，让 IDE agent 能直接调）
-- 📋 流式输出（aha 支持 SSE）
+- ✅ M8 流式输出：token 级逐字打印（aha → lorag mpsc 通道）
 - 📋 Web UI（axum）
+- 📋 MCP server（把 `lorag` 暴露成 MCP tools，让 IDE agent 能直接调）
 - 📋 混合检索（SQLite FTS5 BM25 + 向量 RRF 融合）
 - 📋 工具调用（aha 是否支持 function calling 待确认）
 

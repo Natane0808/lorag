@@ -184,6 +184,10 @@ lorag/
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | 切块参数 | 500 / 50 |
 | `TOP_K` | 检索 top_k | 5 |
 | `LOG_LEVEL` | tracing 级别 | info |
+| `PROMPT_SYSTEM_ROLE` | RAG 系统角色（默认含 5 条防注入铁律） | 内置默认 |
+| `PROMPT_RAG_INSTRUCTION` | query 模式下如何使用上下文 | 内置默认 |
+| `PROMPT_CHAT_CONTEXT_INSTRUCTION` | chat 多轮时指代上下文的指令 | 内置默认 |
+| `PROMPT_BARE_LLM` | 无 RAG 上下文 fallback 提示词 | 内置默认 |
 
 **EMBED_DIM 不再是配置项**——`AhaClient.embed_dim()` 在 load 模型后从 `config.json::hidden_size` 自动读出，lancedb schema 跟模型走。改 `EMBED_MODEL` 后**必须**清库重建（`lorag reindex`）。
 
@@ -239,9 +243,24 @@ pub async fn llm_complete(
     client: &AhaClient, cfg: &AppConfig, preamble: String, question: &str,
 ) -> Result<String>;
 
+/// M8 流式版 llm_complete，通过 mpsc channel 逐 token 输出。
+/// 调用方用 `tokio_stream::wrappers::ReceiverStream` 消费。
+pub async fn llm_complete_stream(
+    client: &AhaClient, cfg: &AppConfig,
+    preamble: String, question: &str,
+) -> Result<tokio::sync::mpsc::Receiver<anyhow::Result<String>>>;
+
 pub async fn rag_query(...) -> Result<String>;  // RAG + fallback to bare LLM
 pub async fn bare_llm_query(...) -> Result<String>;
-pub fn build_chat_preamble(history: &[MessageRecord], chunks: &[String]) -> String;
+
+/// 用户输入防注入：转义 ChatML token + HTML 实体 + 角色前缀
+pub fn sanitize_user_input(input: &str) -> String;
+/// 将 chunks 格式化为 [文档片段 N]...[文档片段 N] 包裹的上下文
+pub fn format_chunks_for_context(chunks: &[String]) -> String;
+/// 构建 RAG prompt（拼接系统角色 + 上下文 + 问题 + 防注入尾注）
+pub fn build_rag_preamble(cfg: &AppConfig, context: &str, question: &str) -> String;
+/// 构建 chat 多轮对话 preamble（cfg 参数新增，M8 重构）
+pub fn build_chat_preamble(cfg: &AppConfig, history: &[MessageRecord], chunks: &[String]) -> String;
 pub fn is_recoverable_error(err: &str) -> bool;
 ```
 
@@ -344,6 +363,10 @@ lorag doctor                        # 11 项环境检查（env / models / storag
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | 500 / 50 | 切块参数 |
 | `TOP_K` | 5 | 检索 top_k |
 | `LOG_LEVEL` | info | tracing filter（默认会 silence lance/lancedb/datafusion/arrow 噪声） |
+| `PROMPT_SYSTEM_ROLE` | 内置默认 | RAG 助手系统角色（内置 5 条防注入铁律，可覆盖） |
+| `PROMPT_RAG_INSTRUCTION` | 内置默认 | query 模式下告诉 LLM 如何使用【上下文】 |
+| `PROMPT_CHAT_CONTEXT_INSTRUCTION` | 内置默认 | chat 多轮时指代【文档上下文】的指令 |
+| `PROMPT_BARE_LLM` | 内置默认 | 无 RAG 上下文 fallback 的简洁提示词 |
 
 **换 embedding 模型**（维度变）：改 `EMBED_MODEL` → `lorag models pull` → `lorag reindex <path>`（自动清库重建）。只换 LLM 不动 embedding 时**不用**清库。
 
@@ -353,13 +376,12 @@ lorag doctor                        # 11 项环境检查（env / models / storag
 
 1. **单进程内存叠加**：4B LLM (~8GB FP16) + 0.6B Embedding (~1.5GB) + 可选 Rerank (~1.5GB) ≈ 10–12GB RAM。换小模型可降（0.6B LLM ~1.2GB + 0.6B Embedding ~1.5GB ≈ 3GB）。
 2. **CUDA 编译陷阱**：`cargo build`（无 flag）会盖掉 CUDA 二进制。改完代码后**必须**用 `cargo build --features cuda` 保住 GPU 加速（CPU 二进制仍能跑，但 4B 会从 1–3s 退化到 15–30s/query）。
-3. **无流式输出**：CPU 推理 15–30s/query 期间无反馈，用户只能干等。aha 本身支持 SSE 流式，M8 计划实装。
-4. **纯向量检索**：关键词召回弱（实测 2/17 FAIL 都是关键词 `DFDB` 未被向量检索命中）。SQLite FTS5 BM25 混合检索计划在 M9 实装。
-5. **PDF 扫描版无效**：`pdf-extract` 只读文本层；扫描版得 OCR（aha 本身有 OCR 模型，未实装）。
-6. **xlsx 多 sheet 平铺**：所有 sheet 文本拼一起，不保留表结构 / 公式。
-7. **同步摄入**：超大文件（>100MB）可能 OOM；后续可改流式。
-8. **rerank hard case 未验证**：generic 14/17 测试 rerank on/off 都 14/17，无质量差异；rerank 价值预期在 hard case（top-5 召回错但 top-50 里有），待真业务问题验证。
-9. **Windows 文件锁**：Zed 编辑器打开时 rust-analyzer 会锁 `data/lorag.db`，关闭 Zed 才能 `lorag reindex` 删库。
+3. **纯向量检索**：关键词召回弱（实测部分关键词 / 数字日期类查询失败，纯向量对精确字面召回不敏感）。SQLite FTS5 BM25 混合检索计划在 M9 实装。
+4. **PDF 扫描版无效**：`pdf-extract` 只读文本层；扫描版得 OCR（aha 本身有 OCR 模型，未实装）。
+5. **xlsx 多 sheet 行前缀**：多 sheet 时每行加 `[SheetName]` 前缀（M8 修复），但仍不保留表结构 / 公式。
+6. **同步摄入**：超大文件（>100MB）可能 OOM；后续可改流式。
+7. **rerank hard case 未验证**：generic 14/17 测试 rerank on/off 都 14/17，无质量差异；rerank 价值预期在 hard case（top-5 召回错但 top-50 里有），待真业务问题验证。
+8. **Windows 文件锁**：Zed 编辑器打开时 rust-analyzer 会锁 `data/lorag.db`，关闭 Zed 才能 `lorag reindex` 删库。
 
 ---
 
@@ -413,10 +435,10 @@ dev profile `opt-level = 1` 跑 0.6B 实测 4.5s/query（vs full debug 142s）�
 
 ### 🔥 近期（M8–M10）
 
-**M8：流式输出**
-- 痛点：CPU 推理 15–30s/query 完全静默，体验差。
-- 方案：aha 本身支持 SSE 流式，rig 0.40 的 `CompletionModel::stream()` 已留槽位（当前 `unimplemented`）。打通 aha → rig → lorag SSE 管线，CLI 端逐 token 打印。
-- 预估：~200 行。**前置依赖**：无。
+**✅ M8：流式输出（已完成）**
+- 实现：`llm_complete_stream` 通过 `mpsc::channel(64)` + `spawn_blocking` 桥接 aha `generate_stream`。
+  CLI 端 `query` 分三阶段流式（retrieve → generate → print tokens），`chat` 每轮逐 token 输出并持久化。
+- 注意：不走 rig 抽象（`rig_compat.rs` `stream()` 未改动），直接调 aha `GenerateModel::generate_stream`。
 - 完成后 Web UI（M10）可直接消费 SSE 流。
 
 **M9：混合检索（BM25 + 向量 RRF）**
