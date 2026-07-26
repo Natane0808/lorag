@@ -44,9 +44,13 @@ lorag ingest path/to/your/docs/
 lorag query "文档里讲了什么？"
 ```
 
-默认模型（写在小机器上能跑的 0.6B 配置；想用更大模型自己改 `.env`）：
-- LLM：`Qwen/Qwen3-0.6B`（小，CPU 也能跑；想要更好回答换 `Qwen3-1.7B` / `4B`）
+默认模型（4B LLM + 0.6B Embedding 起步，性价比最优点）：
+- LLM：`Qwen/Qwen3-4B`（CUDA 1-3s/query，CPU 15-30s/query；想要更快换 `Qwen3-1.7B` / `0.6B`，想要更强上 `8B`）
 - Embedding：`Qwen/Qwen3-Embedding-0.6B`（1024 维，质量比 MiniLM 显著好；维度自动读，不用配）
+- 可选：加 `Qwen3-Reranker-0.6B` 召回率再 +15-25%（aha 原生支持）
+
+> **CUDA 推荐**：`cargo build --features aha/cuda` 重 build 一次，4B 在 RTX 4080 SUPER 上能跑到 1-3s/query。
+> **0.6B 起步**也行：纯 CPU 也能跑（~5s/query），但 LLM 答非所问率较高，复杂问题会失望。
 
 完整支持的模型列表见 [aha supported-models.zh-CN.md](https://github.com/jhqxxx/aha/blob/main/docs/supported-models.zh-CN.md)。
 

@@ -724,8 +724,8 @@ cargo fmt --check; cargo clippy --all-targets -- -D warnings; cargo test --lib
 .\target\debug\lorag.exe models status
 # 预期：两个模型都 [ok]，一个标 ~/.aha/ 一个标 MODELS_DIR
 
-# 3. 端到端 aha→rig 真跑通（用 0.6B 几秒内出结果；4B 慢但准）
-$env:LORAG_ENV = ".env.smoke"    # 0.6B 配置
+# 3. 端到端 aha→rig 真跑通（推荐 4B + CUDA 1-3s/query；0.6B 纯 CPU 也能跑 ~5s 但质量弱）
+$env:LORAG_ENV = ".env"           # 4B + 0.6B Embedding（推荐配置）
 .\target\debug\lorag.exe init     # 加载
 .\target\debug\lorag.exe query "1+1=?"  # 预期: "1 + 1 = 2"
 ```
@@ -743,7 +743,7 @@ $env:LORAG_ENV = ".env.smoke"    # 0.6B 配置
 #   - Qwen/Qwen3-Embedding-4B    → 2560 维
 #   - Qwen/Qwen3-Embedding-8B    → 4096 维
 LLM_MODEL=Qwen/Qwen3-4B
-EMBED_MODEL=sentence-transformers/all-MiniLM-L6-v2
+EMBED_MODEL=Qwen/Qwen3-Embedding-0.6B
 
 # ----- 模型下载位置（aha::utils::download_model 的 save_dir）-----
 MODELS_DIR=./data/models
