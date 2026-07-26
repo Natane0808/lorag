@@ -30,10 +30,6 @@ nohup.out
 *.log.*
 # 测试 fixture（占空间 + 是临时数据；tests/*.rs 仍可提交）
 tests/fixtures/
-# tests/scratch/ 里的运行时日志（background task redirect 的 stdout/stderr）
-# Python 辅助脚本（*.py）仍然提交
-tests/scratch/*.out
-tests/scratch/*.err
 # Windows 保留设备名（dir nul 永远存在，加进去 git 就不报 untracked）
 nul
 
