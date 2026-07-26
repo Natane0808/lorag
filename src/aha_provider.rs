@@ -247,10 +247,16 @@ pub fn print_models_status(statuses: &[ModelStatus]) {
 ///   `init_embed_only` 只 load embedding（ingest 用，省 LLM 的 ~8GB 内存 + 数秒到数分钟 load 时间）
 /// - `embed_dim` 在 load embedding 模型后从 `config.json::hidden_size` 读出来；
 ///   lancedb schema 跟模型走，**不再需要** .env 的 `EMBED_DIM`
+/// - `rerank_slot` 是 `Arc<OnceCell<...>>` —— `cfg.rerank_model` 留空时永远 `None`
+///   （不调 `ensure_rerank` 就拿不到模型）；非空时第一次 `ensure_rerank` 触发懒加载，
+///   之后所有 AhaClient clone 共享同一个 ModelInstance。零开销走 RAG 跳过 rerank 路径
 #[derive(Clone)]
 pub struct AhaClient {
     llm: Option<Arc<Mutex<ModelInstance<'static>>>>,
     embed: Arc<Mutex<ModelInstance<'static>>>,
+    /// 懒加载槽：`ensure_rerank` 第一次成功 init 后填上；后续所有调用都从这个 slot 取。
+    /// 用 `OnceCell` 而不是 `Mutex<Option<...>>`：避免反复 lock 检查 + 明确"init once"语义。
+    rerank_slot: Arc<tokio::sync::OnceCell<Arc<Mutex<ModelInstance<'static>>>>>,
     /// embedding 模型的实际输出维度（load 后从 `config.json::hidden_size` 读）。
     /// 启动期间都填好；用于 lancedb 建表 / query 维度校验。
     embed_dim: Option<usize>,
@@ -262,6 +268,8 @@ impl std::fmt::Debug for AhaClient {
         f.debug_struct("AhaClient")
             .field("llm_model", &self.cfg.llm_model)
             .field("embed_model", &self.cfg.embed_model)
+            .field("rerank_model", &self.cfg.rerank_model)
+            .field("rerank_loaded", &self.rerank_slot.get().is_some())
             .field("embed_dim", &self.embed_dim)
             .finish_non_exhaustive()
     }
@@ -361,6 +369,7 @@ impl AhaClient {
         Ok(Self {
             llm: Some(Arc::new(Mutex::new(llm))),
             embed: Arc::new(Mutex::new(embed)),
+            rerank_slot: Arc::new(tokio::sync::OnceCell::new()),
             embed_dim,
             cfg,
         })
@@ -422,6 +431,7 @@ impl AhaClient {
         Ok(Self {
             llm: None,
             embed: Arc::new(Mutex::new(embed)),
+            rerank_slot: Arc::new(tokio::sync::OnceCell::new()),
             embed_dim,
             cfg,
         })
@@ -491,6 +501,103 @@ impl AhaClient {
         .await
         .context("embedding task panicked")?
         .context("aha embed_texts failed")
+    }
+
+    /// Rerank 是否可用（`cfg.rerank_model` 非空，且 rerank 成功 load）。
+    ///
+    /// 跟 `has_llm()` 不同：rerank 永远是懒加载，所以要查"已 load"而非"config 设置"。
+    /// `cfg.rerank_model` 留空 → 永远 false（永不触发 load）。
+    pub fn has_rerank(&self) -> bool {
+        self.rerank_slot.get().is_some()
+    }
+
+    /// Rerank 模型是否**配置**（`.env` 里 `RERANK_MODEL=` 非空）。
+    ///
+    /// 跟 [`has_rerank`] 区别：`has_rerank` 还要看是否真 load（懒加载），
+    /// `rerank_configured` 只看 config。banner / status 用这个。
+    pub fn rerank_configured(&self) -> bool {
+        !self.cfg.rerank_model.is_empty()
+    }
+
+    /// 懒加载 rerank 模型（**第一次** rerank 时调）。
+    ///
+    /// - 不会重复 load（OnceCell 内部保证）
+    /// - `cfg.rerank_model` 留空 → 报清晰错误（让上层 fallback 到无 rerank 路径）
+    /// - 模型本地路径找不到 → 报 `run: lorag models pull` 提示
+    /// - model id 写错 → 报 `check aha::models::common::model_mapping` 提示
+    /// - 并发第一次 load：OnceCell 保证只有一个 task 真正 load，其他 task 等
+    pub async fn ensure_rerank(&self) -> Result<()> {
+        if self.cfg.rerank_model.is_empty() {
+            return Err(anyhow!(
+                "rerank requested but RERANK_MODEL is empty in .env (set e.g. RERANK_MODEL=Qwen/Qwen3-Reranker-0.6B, or pass --no-rerank)"
+            ));
+        }
+
+        // OnceCell::get_or_try_init 保证并发只 load 一次
+        self.rerank_slot
+            .get_or_try_init(|| async {
+                let which = WhichModel::from_str(&self.cfg.rerank_model, true).map_err(|_| {
+                    anyhow!(
+                        "config: RERANK_MODEL `{}` is not recognized by aha (see aha::models::common::model_mapping)",
+                        self.cfg.rerank_model
+                    )
+                })?;
+                let path = resolve_model_path(&self.cfg.rerank_model, &self.cfg.models_dir)
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "rerank model not found at {}/{} or ~/.aha/{} (run: lorag models pull)",
+                            self.cfg.models_dir.display(),
+                            self.cfg.rerank_model,
+                            self.cfg.rerank_model
+                        )
+                    })?;
+                let path_str = leak_path_str(&path);
+                let repo = self.cfg.rerank_model.clone();
+                let path_for_err = path.clone();
+
+                println!(
+                    "loading rerank {} from {} (may take 10s~minutes, first time only)...",
+                    repo,
+                    path.display()
+                );
+                let _ = std::io::Write::flush(&mut std::io::stdout());
+                let model = tokio::task::spawn_blocking(move || {
+                    load_model(which, path_str, None, None)
+                })
+                .await
+                .context("rerank load task panicked")?
+                .with_context(|| {
+                    format!(
+                        "failed to load rerank `{repo}` from {}",
+                        path_for_err.display()
+                    )
+                })?;
+                Ok::<_, anyhow::Error>(Arc::new(Mutex::new(model)))
+            })
+            .await
+            .map(|_| ())
+    }
+
+    /// Rerank：对 query + 候选文档列表打分，返回每 doc 的相关分数（float）。
+    ///
+    /// **必须先调 `ensure_rerank` 一次**（rag 层负责）。返回的分数越高越相关，
+    /// 调用方自己按分数降序排 + 取 top_k。
+    pub async fn rerank_score(&self, query: &str, documents: &[String]) -> Result<Vec<f32>> {
+        let rerank = self.rerank_slot.get().ok_or_else(|| {
+            anyhow!(
+                "AhaClient.rerank_slot is empty; call `ensure_rerank` first (caller should have done so)"
+            )
+        })?;
+        let rerank = rerank.clone();
+        let query = query.to_string();
+        let documents = documents.to_vec();
+        tokio::task::spawn_blocking(move || {
+            let mut g = rerank.blocking_lock();
+            g.rerank(&query, &documents)
+        })
+        .await
+        .context("rerank task panicked")?
+        .context("aha rerank failed")
     }
 }
 

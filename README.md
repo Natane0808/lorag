@@ -47,7 +47,7 @@ lorag query "文档里讲了什么？"
 默认模型（4B LLM + 0.6B Embedding 起步，性价比最优点）：
 - LLM：`Qwen/Qwen3-4B`（CUDA 1-3s/query，CPU 15-30s/query；想要更快换 `Qwen3-1.7B` / `0.6B`，想要更强上 `8B`）
 - Embedding：`Qwen/Qwen3-Embedding-0.6B`（1024 维，质量比 MiniLM 显著好；维度自动读，不用配）
-- 可选：加 `Qwen3-Reranker-0.6B` 召回率再 +15-25%（aha 原生支持）
+- 可选：加 `Qwen3-Reranker-0.6B` 召回率再 +15-25%（aha 原生支持，**留空 = 禁用**，懒加载）
 
 > **CUDA 推荐**：`cargo build --features aha/cuda` 重 build 一次，4B 在 RTX 4080 SUPER 上能跑到 1-3s/query。
 > **0.6B 起步**也行：纯 CPU 也能跑（~5s/query），但 LLM 答非所问率较高，复杂问题会失望。

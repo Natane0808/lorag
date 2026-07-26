@@ -77,6 +77,11 @@ pub fn build_chat_preamble(history: &[MessageRecord], chunks: &[String]) -> Stri
     s
 }
 
+/// Rerank 粗筛条数由 `AppConfig::rerank_top_n` 控制（环境变量 `RERANK_TOP_N` / CLI `--rerank-top-n`）。
+///
+/// 默认 50（见 [`crate::config::AppConfig::rerank_top_n`]）。必须 > `top_k`
+/// （否则 rerank 排序没空间）。
+///
 /// **低层**：把 `preamble` + `question` 喂给 LLM，抽第一个 text 段返回。
 ///
 /// `rag_query` / `bare_llm_query` / `cmd_chat` 都走这个统一入口。
@@ -103,11 +108,20 @@ pub async fn llm_complete(
 /// **低层**：embed question + lancedb vector_search top_k + 收集 chunks 文本。
 ///
 /// 不调 LLM；不拼 context。RAG 失败时返回 `Err`，调用方决定要不要 fallback 到裸 LLM。
+///
+/// **rerank 路径**：当 `enable_rerank=true` 且 `client.has_rerank()` 为 true：
+/// 1. vector_search 取 `rerank_top_n` 条候选（**比 `top_k` 大**才有排序空间；调用方保证 `rerank_top_n > top_k`）
+/// 2. 调 `client.rerank_score(question, chunks)` 打分
+/// 3. 按分数降序排，取前 `top_k` 条
+///
+/// `enable_rerank=false` 或 `!client.has_rerank()`：直接 vector_search `top_k` 条，零开销。
 pub async fn retrieve_chunks(
     client: &AhaClient,
     cfg: &AppConfig,
     question: &str,
     top_k: usize,
+    enable_rerank: bool,
+    rerank_top_n: usize,
 ) -> Result<Vec<String>> {
     // ── 1. embed question ──
     let embed_model = client.embedding_model(&cfg.embed_model);
@@ -148,16 +162,23 @@ pub async fn retrieve_chunks(
             "failed to open `documents` table in lancedb (run `lorag ingest <path>` first)",
         )?;
 
-    // ── 3. vector_search top_k ──
+    // ── 3. vector_search limit = max(top_k, rerank_top_n) ──
+    //   rerank 时拿更多候选（top_N），让 rerank 有排序空间；不 rerank 时只取 top_k，省 IO
+    let should_rerank = enable_rerank && client.has_rerank();
+    let fetch_limit = if should_rerank {
+        top_k.max(rerank_top_n)
+    } else {
+        top_k
+    };
     let mut stream = table
         .vector_search(&question_f32[..])?
-        .limit(top_k)
+        .limit(fetch_limit)
         .execute()
         .await
         .context("lancedb vector_search failed")?;
 
     // ── 4. 收集 chunks ──
-    let mut chunks: Vec<String> = Vec::with_capacity(top_k);
+    let mut chunks: Vec<String> = Vec::with_capacity(fetch_limit);
     while let Some(rb) = stream
         .next()
         .await
@@ -188,22 +209,59 @@ pub async fn retrieve_chunks(
         );
     }
 
+    // ── 5. rerank 路径（如果启用）──
+    if should_rerank {
+        // 已经 ensure 过：has_rerank() 返回 true 说明 slot 填了；不会二次 ensure
+        // 防御性：万一 slot 仍空，ensure 一次
+        if !client.has_rerank() {
+            client
+                .ensure_rerank()
+                .await
+                .context("failed to load rerank model")?;
+        }
+        let scores = client
+            .rerank_score(question, &chunks)
+            .await
+            .context("rerank scoring failed")?;
+        if scores.len() != chunks.len() {
+            anyhow::bail!(
+                "rerank returned {} scores for {} chunks — should be 1:1",
+                scores.len(),
+                chunks.len()
+            );
+        }
+        // 按分数降序排（同分时保持原顺序稳定）
+        let mut indexed: Vec<(usize, f32)> = scores.iter().copied().enumerate().collect();
+        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let top: Vec<String> = indexed
+            .into_iter()
+            .take(top_k)
+            .map(|(i, _)| chunks[i].clone())
+            .collect();
+        return Ok(top);
+    }
+
     Ok(chunks)
 }
 
 /// RAG 查询主流程。
 ///
 /// 1. embed question
-/// 2. lancedb vector_search top_k
+/// 2. lancedb vector_search top_k（如果 enable_rerank + 有 rerank 模型 → 粗筛 `rerank_top_n` + rerank 排序取 top_k）
 /// 3. 拼 context 喂 LLM
 /// 4. **如果 LanceDB 还没数据，自动 fallback 到裸 LLM**
+///
+/// `rerank_top_n`：rerank 启用时用作粗筛上限（必须 > `top_k`）。调用方传
+/// `cfg.rerank_top_n`（用户可通过 `RERANK_TOP_N` 环境变量 / `--rerank-top-n` CLI flag 覆盖）。
 pub async fn rag_query(
     client: &AhaClient,
     cfg: &AppConfig,
     question: &str,
     top_k: usize,
+    enable_rerank: bool,
+    rerank_top_n: usize,
 ) -> Result<String> {
-    match try_rag_with_lancedb(client, cfg, question, top_k).await {
+    match try_rag_with_lancedb(client, cfg, question, top_k, enable_rerank, rerank_top_n).await {
         Ok(answer) => Ok(answer),
         Err(e) => {
             let err_str = format!("{e:#}");
@@ -284,8 +342,10 @@ async fn try_rag_with_lancedb(
     cfg: &AppConfig,
     question: &str,
     top_k: usize,
+    enable_rerank: bool,
+    rerank_top_n: usize,
 ) -> Result<String> {
-    let chunks = retrieve_chunks(client, cfg, question, top_k).await?;
+    let chunks = retrieve_chunks(client, cfg, question, top_k, enable_rerank, rerank_top_n).await?;
     let context = chunks
         .iter()
         .enumerate()

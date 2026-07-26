@@ -78,6 +78,14 @@ enum Command {
         /// 检索 top_k
         #[arg(long)]
         top_k: Option<usize>,
+
+        /// 跳过 rerank（即使 .env 配了 RERANK_MODEL）
+        #[arg(long)]
+        no_rerank: bool,
+
+        /// rerank 粗筛条数（覆盖 .env 的 `RERANK_TOP_N`）。**必须** > `top_k`。
+        #[arg(long)]
+        rerank_top_n: Option<usize>,
     },
 
     /// 模型管理
@@ -121,9 +129,17 @@ enum Command {
         #[arg(long)]
         no_rag: bool,
 
+        /// 跳过 rerank（即使 .env 配了 RERANK_MODEL）
+        #[arg(long)]
+        no_rerank: bool,
+
         /// 检索 top_k
         #[arg(long)]
         top_k: Option<usize>,
+
+        /// rerank 粗筛条数（覆盖 .env 的 `RERANK_TOP_N`）。**必须** > `top_k`。
+        #[arg(long)]
+        rerank_top_n: Option<usize>,
     },
 
     /// 诊断环境：检查 .env / 模型文件 / 存储路径 / 编译 feature
@@ -230,7 +246,12 @@ fn run(cli: Cli) -> Result<()> {
                 force,
                 recursive,
             } => cmd_ingest(&cfg, paths, ext, force, recursive).await,
-            Command::Query { question, top_k } => cmd_query(&cfg, question, top_k).await,
+            Command::Query {
+                question,
+                top_k,
+                no_rerank,
+                rerank_top_n,
+            } => cmd_query(&cfg, question, top_k, no_rerank, rerank_top_n).await,
             Command::Models { action } => match action {
                 ModelsAction::Pull => cmd_models_pull(&cfg).await,
                 ModelsAction::Status { r#init } => cmd_models_status(&cfg, r#init).await,
@@ -245,8 +266,23 @@ fn run(cli: Cli) -> Result<()> {
                 no_history,
                 no_banner,
                 no_rag,
+                no_rerank,
                 top_k,
-            } => cmd_chat(&cfg, message, session, no_history, no_banner, no_rag, top_k).await,
+                rerank_top_n,
+            } => {
+                cmd_chat(
+                    &cfg,
+                    message,
+                    session,
+                    no_history,
+                    no_banner,
+                    no_rag,
+                    no_rerank,
+                    top_k,
+                    rerank_top_n,
+                )
+                .await
+            }
             Command::Doctor => cmd_doctor(&cfg),
             Command::Reindex {
                 paths,
@@ -292,19 +328,42 @@ async fn cmd_ingest(
     Ok(())
 }
 
-async fn cmd_query(cfg: &config::AppConfig, question: String, top_k: Option<usize>) -> Result<()> {
+async fn cmd_query(
+    cfg: &config::AppConfig,
+    question: String,
+    top_k: Option<usize>,
+    no_rerank: bool,
+    rerank_top_n: Option<usize>,
+) -> Result<()> {
     use lorag::aha_provider::AhaClient;
     use lorag::rag;
 
     let k = top_k.unwrap_or(cfg.top_k);
+    let rn = rerank_top_n.unwrap_or(cfg.rerank_top_n);
+    let enable_rerank = effective_rerank_enabled(cfg, no_rerank);
+
+    if enable_rerank && rn <= k {
+        anyhow::bail!(
+            "--rerank-top-n ({rn}) must be > --top-k ({k}); rerank needs more candidates than the final count"
+        );
+    }
 
     println!("loading models for query...");
     let client = AhaClient::init(cfg.clone())
         .await
         .context("failed to init AhaClient for query")?;
 
+    if enable_rerank {
+        // ensure_rerank 在 retrieve_chunks 内部 lazy load，但提早提示
+        // 让用户知道"第一次 query 会额外 load rerank"
+        println!(
+            "rerank enabled (model: {}; coarse-fetch top-{rn} → rerank → keep top-{k}; will lazy-load on first query if not already loaded)",
+            cfg.rerank_model
+        );
+    }
+
     println!("searching top-{} chunks for: {question:?}", k);
-    let answer = rag::rag_query(&client, cfg, &question, k)
+    let answer = rag::rag_query(&client, cfg, &question, k, enable_rerank, rn)
         .await
         .context("rag query failed")?;
 
@@ -316,7 +375,11 @@ async fn cmd_query(cfg: &config::AppConfig, question: String, top_k: Option<usiz
 }
 
 async fn cmd_models_pull(cfg: &config::AppConfig) -> Result<()> {
-    let targets = [cfg.llm_model.clone(), cfg.embed_model.clone()];
+    // LLM + embedding + rerank（rerank 留空就跳过；M7.1 后 `models pull` 也管 rerank）
+    let mut targets = vec![cfg.llm_model.clone(), cfg.embed_model.clone()];
+    if !cfg.rerank_model.is_empty() {
+        targets.push(cfg.rerank_model.clone());
+    }
     for repo in targets {
         println!("pulling {repo} → {}/", cfg.models_dir.display());
         let p =
@@ -406,6 +469,15 @@ fn truncate_str(s: &str, max: usize) -> String {
     }
 }
 
+/// 是否启用 rerank：综合 `.env` 的 `RERANK_MODEL` 配置 + CLI 的 `--no-rerank` flag。
+///
+/// - `cfg.rerank_model` 留空 → 永远 false（没配模型）
+/// - 用户传 `--no-rerank` → 强制 false（临时禁）
+/// - 都有 → true（启用）
+fn effective_rerank_enabled(cfg: &config::AppConfig, no_rerank: bool) -> bool {
+    !cfg.rerank_model.is_empty() && !no_rerank
+}
+
 /// M7 `lorag chat` —— 多轮对话 REPL（带历史 + RAG）。
 ///
 /// 行为：
@@ -416,6 +488,7 @@ fn truncate_str(s: &str, max: usize) -> String {
 /// - `/reset` 清空当前 session
 /// - `--session <id>` 续接已有 session
 /// - `--no-history` 每轮独立，不存不读历史
+#[allow(clippy::too_many_arguments)]
 async fn cmd_chat(
     cfg: &config::AppConfig,
     message: Option<String>,
@@ -423,18 +496,27 @@ async fn cmd_chat(
     no_history: bool,
     no_banner: bool,
     no_rag: bool,
+    no_rerank: bool,
     top_k: Option<usize>,
+    rerank_top_n: Option<usize>,
 ) -> Result<()> {
     use lorag::aha_provider::AhaClient;
     use lorag::store::sqlite_store::SqliteStore;
 
     let k = top_k.unwrap_or(cfg.top_k);
+    let rn = rerank_top_n.unwrap_or(cfg.rerank_top_n);
+    let enable_rerank = effective_rerank_enabled(cfg, no_rerank);
+    if enable_rerank && rn <= k {
+        anyhow::bail!(
+            "--rerank-top-n ({rn}) must be > --top-k ({k}); rerank needs more candidates than the final count"
+        );
+    }
     let session_id = session.unwrap_or_else(generate_session_id);
     let sqlite = SqliteStore::open(&cfg.sqlite_path)
         .with_context(|| format!("failed to open sqlite at {}", cfg.sqlite_path.display()))?;
 
     if !no_banner {
-        print_chat_banner(cfg, &session_id, k, no_history, no_rag);
+        print_chat_banner(cfg, &session_id, k, rn, no_history, no_rag, enable_rerank);
     }
 
     println!("loading models (10s~minutes first time, seconds after)...");
@@ -457,8 +539,10 @@ async fn cmd_chat(
             &session_id,
             &msg,
             k,
+            rn,
             no_history,
             no_rag,
+            enable_rerank,
         )
         .await
         {
@@ -506,7 +590,16 @@ async fn cmd_chat(
                     print_chat_help(no_history, no_rag);
                 }
                 "status" => {
-                    print_chat_status(cfg, &sqlite, &session_id, k, no_history, no_rag);
+                    print_chat_status(
+                        cfg,
+                        &sqlite,
+                        &session_id,
+                        k,
+                        rn,
+                        no_history,
+                        no_rag,
+                        enable_rerank,
+                    );
                 }
                 "clear" | "cls" => {
                     for _ in 0..50 {
@@ -532,8 +625,10 @@ async fn cmd_chat(
             &session_id,
             line,
             k,
+            rn,
             no_history,
             no_rag,
+            enable_rerank,
         )
         .await
         {
@@ -553,8 +648,10 @@ async fn run_chat_turn(
     session_id: &str,
     user_msg: &str,
     top_k: usize,
+    rerank_top_n: usize,
     no_history: bool,
     no_rag: bool,
+    enable_rerank: bool,
 ) -> Result<String> {
     use lorag::rag;
 
@@ -571,11 +668,12 @@ async fn run_chat_turn(
             .context("failed to load chat history")?
     };
 
-    // 2. RAG 检索（--no-rag 或失败 → 空 chunks）
+    // 2. RAG 检索（--no-rag 或失败 → 空 chunks；enable_rerank 决定是否 rerank）
     let chunks = if no_rag {
         Vec::new()
     } else {
-        match rag::retrieve_chunks(client, cfg, user_msg, top_k).await {
+        match rag::retrieve_chunks(client, cfg, user_msg, top_k, enable_rerank, rerank_top_n).await
+        {
             Ok(c) => c,
             Err(e) => {
                 let s = format!("{e:#}");
@@ -617,8 +715,10 @@ fn print_chat_banner(
     cfg: &config::AppConfig,
     session_id: &str,
     top_k: usize,
+    rerank_top_n: usize,
     no_history: bool,
     no_rag: bool,
+    enable_rerank: bool,
 ) {
     println!(
         "lorag chat v{} (multi-turn REPL)",
@@ -639,6 +739,16 @@ fn print_chat_banner(
         println!("  RAG:        disabled (--no-rag)");
     } else {
         println!("  RAG:        enabled (top_k={top_k})");
+    }
+    if cfg.rerank_model.is_empty() {
+        println!("  Rerank:     not configured (set RERANK_MODEL= in .env to enable)");
+    } else if enable_rerank {
+        println!(
+            "  Rerank:     enabled ({}, coarse top-{rerank_top_n} → rerank → keep top-{top_k})",
+            cfg.rerank_model
+        );
+    } else {
+        println!("  Rerank:     disabled (--no-rerank)");
     }
     println!();
 }
@@ -663,13 +773,16 @@ fn print_chat_help(no_history: bool, no_rag: bool) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn print_chat_status(
     cfg: &config::AppConfig,
     sqlite: &lorag::store::sqlite_store::SqliteStore,
     session_id: &str,
     top_k: usize,
+    rerank_top_n: usize,
     no_history: bool,
     no_rag: bool,
+    enable_rerank: bool,
 ) {
     println!("status:");
     println!("  session:    {session_id}");
@@ -688,6 +801,16 @@ fn print_chat_status(
         println!("  RAG:        disabled (--no-rag)");
     } else {
         println!("  Top-K:      {top_k}");
+    }
+    if cfg.rerank_model.is_empty() {
+        println!("  Rerank:     not configured");
+    } else if enable_rerank {
+        println!(
+            "  Rerank:     enabled ({}, coarse top-{rerank_top_n} → rerank → keep top-{top_k})",
+            cfg.rerank_model
+        );
+    } else {
+        println!("  Rerank:     disabled (--no-rerank)");
     }
     println!("  Chunk size: {}", cfg.chunk_size);
 }

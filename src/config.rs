@@ -36,6 +36,8 @@ pub fn load() -> Result<AppConfig> {
 struct RawConfig {
     llm_model: String,
     embed_model: String,
+    rerank_model: String,
+    rerank_top_n: Option<usize>,
     models_dir: String,
     download_max_retries: Option<u32>,
     lancedb_dir: String,
@@ -53,6 +55,12 @@ impl RawConfig {
         Ok(Self {
             llm_model: std::env::var("LLM_MODEL").unwrap_or_default(),
             embed_model: std::env::var("EMBED_MODEL").unwrap_or_default(),
+            rerank_model: std::env::var("RERANK_MODEL").unwrap_or_default(),
+            rerank_top_n: std::env::var("RERANK_TOP_N")
+                .ok()
+                .map(|s| s.parse())
+                .transpose()
+                .context("RERANK_TOP_N must be a positive integer")?,
             models_dir: std::env::var("MODELS_DIR").unwrap_or_default(),
             download_max_retries: std::env::var("DOWNLOAD_MAX_RETRIES")
                 .ok()
@@ -86,6 +94,7 @@ impl From<RawConfig> for AppConfig {
         Self {
             llm_model: r.llm_model,
             embed_model: r.embed_model,
+            rerank_model: r.rerank_model,
             models_dir: PathBuf::from(if r.models_dir.is_empty() {
                 "./data/models".to_string()
             } else {
@@ -105,6 +114,7 @@ impl From<RawConfig> for AppConfig {
             chunk_size: r.chunk_size.unwrap_or(500),
             chunk_overlap: r.chunk_overlap.unwrap_or(50),
             top_k: r.top_k.unwrap_or(5),
+            rerank_top_n: r.rerank_top_n.unwrap_or(50),
             log_level: if r.log_level.is_empty() {
                 "info".to_string()
             } else {
@@ -130,6 +140,9 @@ pub struct AppConfig {
     pub llm_model: String,
     /// Embedding 模型 id（同上：aha + 本地路径都用这个）。
     pub embed_model: String,
+    /// Rerank 模型 id（**可选**——留空 = 禁用 rerank，跳过二次排序）。
+    /// 设为 `Qwen/Qwen3-Reranker-0.6B` 等支持的值启用；启用时第一次 query 会懒加载。
+    pub rerank_model: String,
     /// 模型下载/加载目录。aha 的 `download_model` 会下到 `<models_dir>/<repo>/`。
     pub models_dir: PathBuf,
     /// 下载重试次数（传给 `aha::utils::download_model`）。
@@ -144,6 +157,11 @@ pub struct AppConfig {
     pub chunk_overlap: usize,
     /// RAG 检索 top_k。
     pub top_k: usize,
+    /// Rerank 粗筛条数（vector_search 取 top-`rerank_top_n`，再 rerank 排序取 final `top_k`）。
+    /// 默认 50；越大召回越宽但 rerank 越慢 + 越费 CPU/内存。
+    /// **必须** > `top_k`（否则 rerank 排序没空间）。
+    /// CLI `--rerank-top-n` flag 临时覆盖。
+    pub rerank_top_n: usize,
     /// 日志级别（tracing filter），如 `info` / `debug` / `info,lance=error`。默认 `info`。
     /// 如果同时设置了 `RUST_LOG`，`RUST_LOG` 优先。
     pub log_level: String,
@@ -175,6 +193,9 @@ impl AppConfig {
         }
         if self.download_max_retries == 0 {
             return Err(anyhow!("DOWNLOAD_MAX_RETRIES must be > 0"));
+        }
+        if self.rerank_top_n == 0 {
+            return Err(anyhow!("RERANK_TOP_N must be > 0"));
         }
         Ok(())
     }

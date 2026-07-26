@@ -523,11 +523,33 @@ llm_model.completion(CompletionRequest { preamble, chat_history: OneOrMany::one(
 
 `is_recoverable_error` 匹配关键字：`lancedb` / `Lance` / `documents table` / `run lorag ingest` / `memory allocation` / `No such file`。
 
-#### 6.5.4 `lorag chat --no-rag` flag
+#### 6.5.4 `lorag chat --no-rag` / `--no-rerank` flags
 
-`cmd_chat` 多了一个 `--no-rag` flag：直接走 LLM，完全不碰 lancedb。用途：
-- 跑通后想快速对话、不想 load LanceDB
-- 没摄入文档时测试 LLM 本身
+`cmd_chat` / `cmd_query` 加了两个 **可选功能** 禁用 flag：
+- `--no-rag`：直接走 LLM，完全不碰 lancedb
+  - 跑通后想快速对话、不想 load LanceDB
+  - 没摄入文档时测试 LLM 本身
+- `--no-rerank`：跳过 rerank（即使 `.env` 配了 `RERANK_MODEL`）
+  - 临时跑对比测试
+  - Rerank 模型加载出错想强制跑 RAG 不 rerank
+
+**rerank 架构（M7.1 实装）**：
+- `cfg.rerank_model` 留空 → 永远不 load，不调 rerank（零开销）
+- `cfg.rerank_model` 非空 + 没传 `--no-rerank` → `enable_rerank=true`，第一次 query 时懒加载
+- `cfg.rerank_model` 非空 + 传 `--no-rerank` → `enable_rerank=false`，跳过
+- 懒加载用 `Arc<tokio::sync::OnceCell<...>>`（不是 `unsafe` self 改字段；clone 间共享 slot；并发 init 安全）
+
+**RAG 内部 rerank 路径**（`retrieve_chunks` 函数）：
+```
+1. vector_search limit = max(top_k, RERANK_TOP_N=50)
+   - 不 rerank 时只取 top_k
+   - rerank 时取 50 让 rerank 有排序空间
+2. 收集 chunks
+3. enable_rerank && has_rerank() → ensure_rerank + rerank_score
+4. 按分数降序排 + take(top_k)
+```
+
+**为什么 `RERANK_TOP_N=50`**：经验值。1 万 chunks 时召回 +15-25% vs 直接 top-5 向量；rerank 50 条 ~1-2s（CPU 跑 Qwen3-Reranker-0.6B）。
 
 #### 6.5.5 关键实现细节
 
@@ -653,6 +675,7 @@ lorag ingest <PATH>...           # ✅ M2+M3 实装：PATH 可以是文件或目
 
 lorag query <QUESTION>           # ✅ M5 实装：一次性 RAG 问答
     --top-k <N>                  # 默认 5
+    --no-rerank                  # 跳过 rerank（即使 .env 配了 RERANK_MODEL）
 
 lorag models pull                # ✅ M0 实装：调 aha::utils::download_model 把 LLM + embed 下到 MODELS_DIR
 lorag models status              # ✅ M0 实装：打印模型文件存在性（path + "in MODELS_DIR / ~/.aha/"）
@@ -677,6 +700,7 @@ lorag chat                       # ✅ M7 实装：多轮对话 REPL（带 SQLit
     --session <ID>        # 续接已有 session
     --no-history          # 不带历史（每轮独立）
     --no-rag              # 跳过 LanceDB 检索（纯 LLM）
+    --no-rerank           # 跳过 rerank（即使 .env 配了 RERANK_MODEL）
     --no-banner           # 安静启动
     --top-k <N>           # 检索 top_k
 ```
@@ -810,6 +834,7 @@ incremental = true
 > - 5 chunks 实测 `iops=2 requests=2 bytes_read=20992`，无 allocation 爆炸
 > - 加 `is_recoverable_error` fallback：lancedb 出错时自动转裸 LLM
 > - `lorag chat --no-rag` flag：不走 lancedb，纯 LLM（应急 / 快速对话用）
+> - `lorag chat --no-rerank` flag：跳过 rerank（即使 .env 配了 RERANK_MODEL）
 > - arrow-array 58 的 `StringArray::value(i)` 返回 `&str`（**不是** `Option<&str>`，是早期版本 API）
 > **M4 关键经验**（给未来接手的 agent）：
 > - rig 0.40 跟 0.39 API 差异大；用 0.40 写的代码升级到 0.41+ 时**必须重看** `client/completion.rs` + `client/embeddings.rs` + `completion/request.rs`
@@ -841,11 +866,13 @@ incremental = true
 
 - `lorag chat` ✅ M7 已实装（`src/main.rs::cmd_chat`）：多轮 + SQLite 持久化历史 + RAG fallback
 - `lorag reindex` ✅ M5.1 已实装（`src/main.rs::cmd_reindex`）：删 lancedb + sqlite 后重新 ingest。自动检测 embed_model 变化（MVP 不做，太重；用户手动跑 reindex 即可）。
+- rerank（可选功能）✅ M7.1 已实装（`src/rag.rs::retrieve_chunks` + `src/aha_provider.rs::ensure_rerank`）：`RERANK_MODEL=` 配置 + `--no-rerank` flag + 懒加载 + top-50 粗筛 + rerank 排序取 top_k
 - 流式输出（aha 支持 SSE）
 - Web UI（axum）
 - 混合检索（SQLite FTS5 BM25 + 向量 RRF 融合）
-- re-rank（aha 原生支持 `Qwen3-Reranker`）
 - 按 source 删除 / 重建索引
 - 文档结构保留（标题层级、表格、代码块）
 - 利用 aha 的 vision/OCR/ASR 能力（图片理解、扫描 PDF 转文本、语音转写）
 - 发布到 crates.io 时把 aha 依赖从 path 切到 version
+- ⏳ **Tool calling（agent 调外部工具）**：rig 0.40 支持 `CompletionRequest.tools: Vec<ToolDefinition>`。需要先确认 aha 的 chat API 是否支持 function calling（aha 自己的 server 是否实现 tool use）。**优先级低** —— 个人项目 MVP 用不上，外部 agent 自己加 tool 即可。
+- ⏳ **MCP（Model Context Protocol）server**：把 `lorag query` / `lorag ingest` 暴露成 MCP tools，让 Claude Desktop / Cursor / 各种 IDE agent 能直接调。生态价值高（2024-2025 主线），但 MVP + 无外部用户阶段不急。工作量：~500-1000 行（MCP server + tool schemas）+ 测试。优先级：中-高，等用户需求触发。
