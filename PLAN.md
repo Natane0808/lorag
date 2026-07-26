@@ -1,6 +1,6 @@
 # lorag — 规划 (v0.1)
 
-> **状态**：M0–M7.1 全部实装，当前 v0.1 release（MIT，codeberg）。
+> **状态**：M0–M7.1 全部实装。下一步：流式输出（M8）→ 混合检索（M9）→ Web UI（M10）。详见 §11。
 > 历史细节见 [CHANGELOG.md](CHANGELOG.md)。
 
 ---
@@ -15,9 +15,6 @@
 - 配置切换模型、维度、数据库路径全在 `.env` 里
 
 **明确不做**（除非触发用户需求）：
-- 流式输出
-- Web UI / HTTP server
-- 混合检索（BM25 + 向量）
 - 多用户 / 权限
 - 工具调用（tool use / function calling）
 
@@ -354,13 +351,15 @@ lorag doctor                        # 11 项环境检查（env / models / storag
 
 ## 9. 当前限制
 
-1. **单进程内存叠加**：4B LLM (~8GB FP16) + 0.6B Embedding (~1.5GB) + 可选 Rerank (~1.5GB) ≈ 10-12GB RAM。换小模型可降（0.6B LLM ~1.2GB + 0.6B Embedding ~1.5GB ≈ 3GB）。
-2. **CUDA 编译陷阱**：`cargo build`（无 flag）会盖掉 CUDA 二进制。改完代码后**必须**用 `cargo build --features cuda` 保住 GPU 加速（CPU 二进制仍能跑，但 4B 会从 1-3s 退化到 15-30s/query）。
-3. **PDF 扫描版无效**：`pdf-extract` 只读文本层；扫描版得 OCR（aha 本身有 OCR 模型，未实装）。
-4. **xlsx 多 sheet 平铺**：所有 sheet 文本拼一起，不保留表结构 / 公式。
-5. **同步摄入**：超大文件（>100MB）可能 OOM；后续可改流式。
-6. **rerank hard case 未验证**：generic 14/17 测试 rerank on/off 都 14/17，无质量差异；rerank 价值预期在 hard case（top-5 召回错但 top-50 里有），待真业务问题验证。
-7. **Windows 文件锁**：Zed 编辑器打开时 rust-analyzer 会锁 `data/lorag.db`，关闭 Zed 才能 `lorag reindex` 删库。
+1. **单进程内存叠加**：4B LLM (~8GB FP16) + 0.6B Embedding (~1.5GB) + 可选 Rerank (~1.5GB) ≈ 10–12GB RAM。换小模型可降（0.6B LLM ~1.2GB + 0.6B Embedding ~1.5GB ≈ 3GB）。
+2. **CUDA 编译陷阱**：`cargo build`（无 flag）会盖掉 CUDA 二进制。改完代码后**必须**用 `cargo build --features cuda` 保住 GPU 加速（CPU 二进制仍能跑，但 4B 会从 1–3s 退化到 15–30s/query）。
+3. **无流式输出**：CPU 推理 15–30s/query 期间无反馈，用户只能干等。aha 本身支持 SSE 流式，M8 计划实装。
+4. **纯向量检索**：关键词召回弱（实测 2/17 FAIL 都是关键词 `DFDB` 未被向量检索命中）。SQLite FTS5 BM25 混合检索计划在 M9 实装。
+5. **PDF 扫描版无效**：`pdf-extract` 只读文本层；扫描版得 OCR（aha 本身有 OCR 模型，未实装）。
+6. **xlsx 多 sheet 平铺**：所有 sheet 文本拼一起，不保留表结构 / 公式。
+7. **同步摄入**：超大文件（>100MB）可能 OOM；后续可改流式。
+8. **rerank hard case 未验证**：generic 14/17 测试 rerank on/off 都 14/17，无质量差异；rerank 价值预期在 hard case（top-5 召回错但 top-50 里有），待真业务问题验证。
+9. **Windows 文件锁**：Zed 编辑器打开时 rust-analyzer 会锁 `data/lorag.db`，关闭 Zed 才能 `lorag reindex` 删库。
 
 ---
 
@@ -410,17 +409,61 @@ dev profile `opt-level = 1` 跑 0.6B 实测 4.5s/query（vs full debug 142s）�
 
 ---
 
-## 11. 未来方向
+## 11. 路线图（按优先级）
 
-按优先级：
+### 🔥 近期（M8–M10）
 
-1. **MCP server**（中-高）：把 `lorag query` / `lorag ingest` / `lorag sources list` 暴露成 MCP tools，让 Claude Desktop / Cursor / IDE agent 直接调。生态价值高，工作量 ~500-1000 行 + 测试。**触发条件**：有外部用户 / IDE 集成需求。
-2. **rerank hard case 验证**：当前 generic 14/17 测试 rerank on/off 都 14/17，没差异；需要真业务问题（top-5 召回错的）验证 rerank 实际价值。
-3. **流式输出**（aha 支持 SSE）：等用户需求触发。
-4. **混合检索**（SQLite FTS5 BM25 + 向量 RRF 融合）：等 chunk 量到 5K+ 触发。
-5. **多知识库**（多 lancedb 目录 + namespace）：schema 迁移成本高，**推迟**到 ≥3 个 domain / 每个 domain ≥1000 chunks 才做。
-6. **Tool calling / function calling**：aha 自身 server 是否实现 tool use 待确认；rig 0.40 支持 `CompletionRequest.tools: Vec<ToolDefinition>`。**优先级低**——个人项目 MVP 用不上。
-7. **Web UI（axum）**：等有 web 集成需求触发。
+**M8：流式输出**
+- 痛点：CPU 推理 15–30s/query 完全静默，体验差。
+- 方案：aha 本身支持 SSE 流式，rig 0.40 的 `CompletionModel::stream()` 已留槽位（当前 `unimplemented`）。打通 aha → rig → lorag SSE 管线，CLI 端逐 token 打印。
+- 预估：~200 行。**前置依赖**：无。
+- 完成后 Web UI（M10）可直接消费 SSE 流。
+
+**M9：混合检索（BM25 + 向量 RRF）**
+- 痛点：纯向量检索对关键词不敏感（实测 `DFDB` 等缩写词召回失败）。
+- 方案：SQLite FTS5 全文索引（~100 行） + 向量检索结果做 RRF 融合。双路召回取 RRF 得分 top_k。
+- 预估：~200 行。**前置依赖**：无（FTS5 已在 rusqlite bundled feature 中）。
+
+**M10：Web UI**
+- 当前 `lorag chat` 是终端 REPL，RAG 答案含 Markdown/代码时体验差。浏览器天然适合渲染富文本。
+- 方案：`lorag serve` 命令启动 axum server（localhost），前端纯 HTML + HTMX（无需 npm）。
+  - `GET /` → 静态聊天界面
+  - `POST /api/chat` → SSE 流式（复用 M8 SSE 管线）
+  - `POST /api/query` → 一次性 RAG 问答
+- 选型：Web UI > 桌面 GUI。浏览器免费提供 Markdown 渲染、代码高亮、SSE 流式消费。GUI（egui/iced）需手写所有控件，开发成本更高。
+- 预估：~500–800 行。**前置依赖**：M8（流式输出）。新增依赖：`axum`。
+
+### 🟡 中期（M11–M12）
+
+**M11：CI/CD**
+- 当前无 CI。48 个单元测试 + clippy + fmt 只在本地跑。
+- 方案：Codeberg CI（`.forgejo/workflows/ci.yml`）跑 `cargo fmt --check && cargo clippy -- -D warnings && cargo test --lib`。无需 GPU/模型。
+- 预估：~20 行 yaml。
+
+**M12：MCP server**
+- 把 `lorag query` / `lorag ingest` / `lorag sources list` 暴露成 MCP tools，让 Claude Desktop / Cursor / IDE agent 直接调本地 RAG。
+- 生态价值高，触发条件是有外部用户或 IDE 集成需求。
+- 预估：~500–1000 行。新增依赖：`mcp-server` crate（或手写 stdio JSON-RPC）。
+
+### 🟢 远期（Backlog）
+
+**评估框架增强**
+- `eval_questions.py` 加计时统计（min/median/max/p99）、rerank on/off 对比、结果持久化（`--save results.json`）。
+
+**rerank 价值验证**
+- 当前 14/17 generic 测试 rerank 无差异。需要找 top-5 检索不准但 top-50 能召回的 hard case。
+
+**发布到 crates.io**
+- `aha = { path = "..." }` → `aha = "0.x"`（需 aha 先发布），然后 `lorag` 可 `cargo install`。
+
+**模型量化**
+- 如果 aha 支持 GGUF / GPTQ / AWQ 量化：4B Q4 ~3GB（vs FP16 ~8GB）。取决于 aha 上游。
+
+**多知识库**
+- 多 lancedb 目录 + namespace 隔离。推迟到 >=3 个 domain / 每个 >=1000 chunks。
+
+**Tool calling**
+- aha 自身 server 是否实现 tool use 待确认；rig 0.40 支持 `CompletionRequest.tools`。个人项目 MVP 优先级低。
 
 ---
 
