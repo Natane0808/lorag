@@ -113,10 +113,6 @@ enum Command {
         #[arg(long, short)]
         message: Option<String>,
 
-        /// 续接已有 session（id 来自 /status 显示）
-        #[arg(long)]
-        session: Option<String>,
-
         /// 不带历史（每轮独立）
         #[arg(long)]
         no_history: bool,
@@ -262,7 +258,6 @@ fn run(cli: Cli) -> Result<()> {
             },
             Command::Chat {
                 message,
-                session,
                 no_history,
                 no_banner,
                 no_rag,
@@ -273,7 +268,6 @@ fn run(cli: Cli) -> Result<()> {
                 cmd_chat(
                     &cfg,
                     message,
-                    session,
                     no_history,
                     no_banner,
                     no_rag,
@@ -485,14 +479,14 @@ fn effective_rerank_enabled(cfg: &config::AppConfig, no_rerank: bool) -> bool {
 /// - 把每轮的 user/assistant 消息存 sqlite 的 `messages` 表
 /// - 下一轮 LLM call 前从 sqlite 读最近 N 条拼到 preamble
 /// - RAG 检索失败时退化成纯 chat（带历史无 context）
-/// - `/reset` 清空当前 session
-/// - `--session <id>` 续接已有 session
 /// - `--no-history` 每轮独立，不存不读历史
+///
+/// session_id 内部生成（`chat-YYYYMMDDTHHMMSS-<n>`）但用户感知不到——chat 进程
+/// 内连续，跨进程不续接（web UI / 续接需求出现再设计）。
 #[allow(clippy::too_many_arguments)]
 async fn cmd_chat(
     cfg: &config::AppConfig,
     message: Option<String>,
-    session: Option<String>,
     no_history: bool,
     no_banner: bool,
     no_rag: bool,
@@ -511,12 +505,12 @@ async fn cmd_chat(
             "--rerank-top-n ({rn}) must be > --top-k ({k}); rerank needs more candidates than the final count"
         );
     }
-    let session_id = session.unwrap_or_else(generate_session_id);
+    let session_id = generate_session_id();
     let sqlite = SqliteStore::open(&cfg.sqlite_path)
         .with_context(|| format!("failed to open sqlite at {}", cfg.sqlite_path.display()))?;
 
     if !no_banner {
-        print_chat_banner(cfg, &session_id, k, rn, no_history, no_rag, enable_rerank);
+        print_chat_banner(cfg, k, rn, no_history, no_rag, enable_rerank);
     }
 
     println!("loading models (10s~minutes first time, seconds after)...");
@@ -587,7 +581,7 @@ async fn cmd_chat(
                     break;
                 }
                 "help" | "h" | "?" => {
-                    print_chat_help(no_history, no_rag);
+                    print_chat_help(no_rag);
                 }
                 "status" => {
                     print_chat_status(
@@ -606,10 +600,6 @@ async fn cmd_chat(
                         println!();
                     }
                 }
-                "reset" => match sqlite.clear_session(&session_id) {
-                    Ok(n) => println!("session reset: {session_id} ({n} message(s) cleared)"),
-                    Err(e) => eprintln!("failed to reset session: {e:#}"),
-                },
                 other => {
                     eprintln!("unknown command: /{other} (try /help)");
                 }
@@ -713,7 +703,6 @@ async fn run_chat_turn(
 
 fn print_chat_banner(
     cfg: &config::AppConfig,
-    session_id: &str,
     top_k: usize,
     rerank_top_n: usize,
     no_history: bool,
@@ -724,7 +713,6 @@ fn print_chat_banner(
         "lorag chat v{} (multi-turn REPL)",
         env!("CARGO_PKG_VERSION")
     );
-    println!("  session:    {session_id}");
     if no_history {
         println!("  history:    disabled (--no-history, 每轮独立)");
     } else {
@@ -753,14 +741,11 @@ fn print_chat_banner(
     println!();
 }
 
-fn print_chat_help(no_history: bool, no_rag: bool) {
+fn print_chat_help(no_rag: bool) {
     println!("commands:");
     println!("  /help, /h, /?    show this help");
-    println!("  /status          show session + history + model info");
+    println!("  /status          show current model + RAG + rerank config");
     println!("  /clear, /cls     clear the screen (50 newlines)");
-    if !no_history {
-        println!("  /reset           clear this session's history (keeps session id)");
-    }
     println!("  /exit, /quit, /q exit the chat");
     println!();
     println!("anything else is treated as a question and sent through the chat pipeline.");
@@ -785,7 +770,6 @@ fn print_chat_status(
     enable_rerank: bool,
 ) {
     println!("status:");
-    println!("  session:    {session_id}");
     if no_history {
         println!("  history:    disabled (--no-history)");
     } else {
