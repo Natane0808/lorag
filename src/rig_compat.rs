@@ -1,27 +1,11 @@
 //! rig 0.40 provider 适配。
 //!
-//! 把 [`crate::aha_provider::AhaClient`] 装成 rig 能用的 client。
+//! 把 [`crate::aha_provider::AhaClient`] 装成 rig 能用的 client：
+//! - [`CompletionClient`] → [`AhaCompletionModel`]
+//! - [`EmbeddingsClient`] → [`AhaEmbeddingModel`]
 //!
-//! ## 实现范围（MVP）
-//!
-//! - [`CompletionClient`] for [`AhaClient`] → [`AhaCompletionModel`]
-//! - [`EmbeddingsClient`] for [`AhaClient`] → [`AhaEmbeddingModel`]
-//! - [`CompletionModel`] for [`AhaCompletionModel`]（`stream()` 留 unimplemented）
-//! - [`EmbeddingModel`] for [`AhaEmbeddingModel`]
-//!
-//! ## 不实现
-//!
-//! - [`crate::aha_provider::Provider`] / [`crate::aha_provider::ProviderClient`] —— 0.40 的版本是给 HTTP
-//!   客户端用的（`reqwest::Client` + `from_env` / `from_val`），我们走 in-process 推理，不需要
-//! - 流式输出 —— MVP 留 TODO
-//! - tool calls / structured output —— MVP 留 TODO
-//!
-//! ## 设计要点
-//!
-//! - `type Response = aha::params::chat::ChatCompletionResponse`（aha 类型已有 `Serialize + DeserializeOwned`）
-//! - `type StreamingResponse = ()`（`()` 已实现 [`GetTokenUsage`]）
-//! - `stream()` 永远返回 `Err(CompletionError::ProviderError(...))`
-//! - 消息转换：rig `Message` → aha `ChatMessage`（用 `additional_params` / `preamble` / `documents` → 拼成 system + user 消息）
+//! 不实现：Provider / ProviderClient（0.40 是给 HTTP client 用的）、流式输出、tool calls。
+//! 消息转换：rig `Message` → aha `ChatMessage`（preamble / documents 拼成 system + user）。
 
 use rig::client::{CompletionClient, EmbeddingsClient};
 use rig::completion::message::{AssistantContent, Message, Text, UserContent};
@@ -47,6 +31,7 @@ use crate::aha_provider::AhaClient;
 // rig 0.40 用 `WasmCompatSend: Send`（native build）当 trait bound，
 // 所有跨 await 持有的类型都得 Send + Sync
 #[allow(dead_code)]
+// M5+ 按需放开
 fn _assert_send_sync() {
     fn assert<T: Send + Sync>() {}
     assert::<AhaClient>();

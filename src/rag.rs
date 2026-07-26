@@ -1,25 +1,12 @@
 //! RAG 查询：手写 embed → lancedb vector_search → 拼 context → LLM。
 //!
-//! **M5 重要决定**：不用 rig-lancedb 的 `LanceDbVectorIndex` + `AgentBuilder::dynamic_context`。
-//! 原因：rig 0.40 + rig-lancedb 0.40 + lancedb 0.30 集成内部某步会一次性分配 ~62GB 内存
-//! （已实测爆掉用户 64GB 机器）。**绕开** 这层抽象，直接调 lancedb 原生 API + rig
-//! `completion_model.completion()`，每步内存都自己控制，5 chunk 也能跑。
+//! 不用 rig-lancedb 的 `LanceDbVectorIndex` + `AgentBuilder::dynamic_context`
+//! （rig 0.40 + lancedb 0.30 集成内部某步会一次性分配 ~62GB 内存）。
+//! 直接调 lancedb 原生 API + rig `completion_model.completion()`。
 //!
-//! ## 流程
+//! ## Fallback
 //!
-//! 1. embed question → 384-dim f64 vec（rig Embedding.vec 是 f64）
-//! 2. 转 f64 → f32（lancedb vector_search 接受 &[f32]）
-//! 3. lancedb native `table.vector_search(&[f32])?.limit(top_k).execute()` → RecordBatch stream
-//! 4. 从 RecordBatch 抽 `text` 列（StringArray），收集 top_k chunks
-//! 5. 拼 context 字符串，喂给 `llm_model.completion(req)` 拿答案
-//!
-//! ## Fallback 行为
-//!
-//! 如果 LanceDB 还没数据（lancedb 目录不存在 / `documents` 表不存在 / 其他 lance 错误），
-//! 自动 fallback 到 **裸 LLM**（不检索 context，直接问模型）。这样：
-//! - 首次跑通也能对话
-//! - REPL / `lorag query` 任何时候都能用
-//! - 有数据时享受 RAG，没数据时退化为 LLM（不报错）
+//! LanceDB 没数据时自动 fallback 到裸 LLM：不检索 context，直接问模型。
 
 use std::path::Path;
 
@@ -330,13 +317,7 @@ fn extract_text_from_response(
     }
 }
 
-/// 完整 RAG 流程（不带 fallback）。
-///
-/// **手写** embed → lancedb vector_search → 拼 context → LLM。
-/// 不依赖 `LanceDbVectorIndex` 或 `dynamic_context` —— 这两层抽象在当前 rig/lancedb
-/// 集成里有隐藏的 ~62GB 内存分配 bug（实测过）。
-///
-/// 内部走 `retrieve_chunks` + `llm_complete` 两个低层。
+/// 完整 RAG 流程（不带 fallback）。内部走 `retrieve_chunks` + `llm_complete`。
 async fn try_rag_with_lancedb(
     client: &AhaClient,
     cfg: &AppConfig,

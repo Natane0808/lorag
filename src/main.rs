@@ -198,11 +198,9 @@ fn main() -> ExitCode {
     // 先加载 .env，让 LOG_LEVEL 在 tracing init 时可用
     let _ = dotenvy::dotenv();
 
-    // 日志过滤：默认静默 lance / lancedb / datafusion / arrow 的 INFO 噪声（每次 query 都打
-    // 一堆 plan_run / dataset_events log，太丑）。RUST_LOG 优先；否则用 LOG_LEVEL（兼容旧）；
-    // 否则默认 `info`。**lance silencing 是必加后缀**，不管用户怎么设 base 都会追加。
-    //
-    // 注意：env_filter 的 target 段是字面量（不支持 glob），所以要显式列全 `lance::*` targets。
+    // 默认静默 lance / lancedb / datafusion / arrow 的 INFO 日志。
+    // RUST_LOG > LOG_LEVEL > 默认 `info`。lance silencing 是必加后缀。
+    // env_filter target 段是字面量（不支持 glob），必须显式列全。
     let lance_silence = ",lance::dataset_events=warn,lance::execution=warn,lance::io_events=warn,\
 lance::file_audit=warn,lancedb=warn,datafusion=warn,arrow=warn";
     let base = std::env::var("RUST_LOG")
@@ -290,7 +288,7 @@ fn run(cli: Cli) -> Result<()> {
 }
 
 // =============================================================================
-// 命令实现（M0：占位；后续 milestone 替换为真实逻辑）
+// 命令实现
 // =============================================================================
 
 async fn cmd_ingest(
@@ -303,8 +301,7 @@ async fn cmd_ingest(
     use lorag::aha_provider::AhaClient;
     use lorag::ingest::pipeline;
 
-    // ingest 只需要 embedding 模型来向量化 chunk，加载 LLM 纯属浪费
-    // （4B LLM ~8GB 内存 + 数十秒 load）。用 init_embed_only 跳过 LLM。
+    // ingest 只需 embedding 模型，跳过 LLM 省 ~8GB 内存 + 数十秒 load 时间。
     println!("loading embedding model for ingest (skipping LLM to save memory + time)...");
     let client = AhaClient::init_embed_only(cfg.clone())
         .await
@@ -935,10 +932,6 @@ async fn cmd_reindex(
 }
 
 /// 列出 sqlite 主文件 + 旁文件（journal / wal / shm）。
-///
-/// 直接在原路径字符串上 append suffix（不用 `set_file_name`）—— 保持跟 `cfg.sqlite_path`
-/// 一样的分隔符风格（避免 Windows 上 `set_file_name` 跟 parent 的 forward slash 混出来
-/// `data\foo.db-wal` 这种丑格式）。功能上 `remove_file` 都认，但 display 出来难看。
 fn sqlite_files_for(sqlite_path: &std::path::Path) -> Vec<PathBuf> {
     let mut out = vec![sqlite_path.to_path_buf()];
     let base = sqlite_path.to_string_lossy();

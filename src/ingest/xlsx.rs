@@ -36,10 +36,8 @@ pub fn extract(path: &Path) -> Result<String> {
 
         let mut sheet_text = String::new();
 
-        // calamine 把"没有任何数据"或"只有 1 个空 cell"的 sheet 视为空（`start()` 返 None）。
-        // **不**让单 sheet 触发整文件 fail —— 静默 skip，其他 sheet 继续处理。
-        // 实测触发：openpyxl 显示 `max_row=1, max_col=1, dimensions=A1:A1` 这种"幽灵 sheet"
-        // （workbook 里有记录但 A1 是 None），calamine 把它判空。
+        // calamine 把没有任何数据的 sheet 视为空（`start()` 返 None）。
+        // 单个空 sheet 静默 skip，不中断整文件。
         let Some((start_row, end_row)) = range.start() else {
             skipped_empty.push(sheet_name.clone());
             continue;

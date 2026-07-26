@@ -128,20 +128,19 @@ async fn ingest_one(
     // 直接取 Embedding.vec（已是 Vec<f64>，跟 lancedb Float64 schema 一致）
     let vecs: Vec<Vec<f64>> = embeddings.iter().map(|emb| emb.vec.clone()).collect();
 
-    // 6. 写 lancedb（dim 来自 AhaClient.loaded 模型，不再从 cfg 读）
+    // 6. 写 lancedb
     let embed_dim = client
         .embed_dim()
         .context("AhaClient has no embed_dim (model failed to expose dim); this is a bug")?;
     lancedb_store::insert_batch(table, &chunks, &hash, vecs, embed_dim).await?;
 
-    // 6.5 数据量够了就建 HNSW 索引；不够 silently 跳过（< 256 行）
-    //    失败不阻塞 ingest —— index 可以后续手动重试
+    // 7. 建 HNSW 索引（≥256 行才建；失败不阻塞 ingest）
     if let Err(e) = lancedb_store::ensure_hnsw_index(table).await {
         tracing::warn!("HNSW index build failed (ingest still ok): {:#}", e);
         println!("  warning: HNSW index build failed: {e:#}");
     }
 
-    // 7. 写 sqlite
+    // 8. 写 sqlite
     let record = SourceRecord {
         source_path: source_path.clone(),
         source_hash: hash,

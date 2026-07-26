@@ -1,25 +1,12 @@
-//! aha ↔ rig 适配 + 模型下载/加载。
+//! aha ↔ rig 适配 + 模型下载/加载。aha crate 的**唯一**业务入口。
 //!
-//! 这是 aha crate 的**唯一**业务入口：上层模块（rag / ingest）**不要**直接 `use aha::*`。
-//! 全部走 rig 抽象（[`AhaClient`] / [`AhaCompletionModel`] / [`AhaEmbeddingModel`]，M4 阶段实装）。
+//! 上层模块（rag / ingest）**不要**直接 `use aha::*`，全部走 rig 抽象。
 //!
-//! M0 阶段实装：
-//! - [`ensure_model_downloaded`]：调 `aha::utils::download_model` 下载模型
-//! - [`models_status`]：检查模型文件存在性 + 报告本地路径
+//! ## 路径解析
 //!
-//! M1 阶段实装：
-//! - [`AhaClient::init`]：调 `aha::models::load_model` 把 LLM + embedding 加载进内存
-//! - [`AhaClient::llm_generate`] / [`AhaClient::embed_texts`]：把同步 candle 调用包成 async
-//!
-//! ## 路径解析约定（重要）
-//!
-//! aha crate 自己的 `is_model_downloaded` 写死查 `~/.aha/{model_id}/`，跟 `download_model`
-//! 接受的 `save_dir` 路径不同步——aha 自己的 CLI `aha list` 也踩这个坑（先 `aha download -m X -s /tmp/foo`
-//! 再 `aha list` 仍显示 X 未下）。我们**不**依赖 aha 的 `is_model_downloaded`，
-//! 而是用自己的 [`resolve_model_path`]：优先 `MODELS_DIR/{repo}/`，兜底 `~/.aha/{repo}/`，
-//! 兼容之前用 aha CLI 装过模型的用户。
-//!
-//! "已下载"的判断：目录存在 + 含 `config.json` + 至少一个 `*.safetensors`（aha `init` 实际期待的文件）。
+//! 用自己的 [`resolve_model_path`] 判断"已下载"（不依赖 aha 的 `is_model_downloaded`——
+//! aha 自己写死查 `~/.aha/` 但 `download_model` 接受自定义 `save_dir`，路径不同步）。
+//! 优先 `MODELS_DIR/{repo}/`，兜底 `~/.aha/{repo}/`（兼容 aha CLI 老用户）。
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -234,22 +221,11 @@ pub fn print_models_status(statuses: &[ModelStatus]) {
 
 /// lorag 对 aha 的统一句柄。
 ///
-/// - M1：持有两个 `Arc<Mutex<ModelInstance<'static>>>`（LLM + embedding），
-///   暴露 async helper [`Self::llm_generate`] 和 [`Self::embed_texts`]
-/// - M4：实现 rig `ProviderClient` / `CompletionClient` / `EmbeddingsClient`，
-///   上层 agent 只通过 rig 抽象访问
-///
-/// **设计要点**
-/// - LLM 和 embedding 用**各自**的 `Mutex`（不共享一个），让 embed 和 generate 能并发
-/// - 同步 candle 调用一律包成 `tokio::task::spawn_blocking`，避免阻塞 reactor
-/// - 路径用 [`resolve_model_path`]，不依赖 aha 的 `is_model_downloaded` / `get_default_weight_path`
-/// - `llm` 是 `Option`——`init` 同时 load LLM+embedding（query / shell 用），
-///   `init_embed_only` 只 load embedding（ingest 用，省 LLM 的 ~8GB 内存 + 数秒到数分钟 load 时间）
-/// - `embed_dim` 在 load embedding 模型后从 `config.json::hidden_size` 读出来；
-///   lancedb schema 跟模型走，**不再需要** .env 的 `EMBED_DIM`
-/// - `rerank_slot` 是 `Arc<OnceCell<...>>` —— `cfg.rerank_model` 留空时永远 `None`
-///   （不调 `ensure_rerank` 就拿不到模型）；非空时第一次 `ensure_rerank` 触发懒加载，
-///   之后所有 AhaClient clone 共享同一个 ModelInstance。零开销走 RAG 跳过 rerank 路径
+/// - LLM 和 embedding 用各自的 `Mutex`（不共享），embed 和 generate 可并发
+/// - 同步 candle 调用一律包 `tokio::task::spawn_blocking`，避免阻塞 reactor
+/// - `llm` 是 `Option`：`init` 同时 load LLM+embedding，`init_embed_only` 只 load embedding
+/// - `embed_dim` 在 load 后从 `config.json::hidden_size` 读，lancedb schema 跟模型走
+/// - `rerank_slot` 是 `Arc<OnceCell<...>>`：第一次 `ensure_rerank` 触发懒加载
 #[derive(Clone)]
 pub struct AhaClient {
     llm: Option<Arc<Mutex<ModelInstance<'static>>>>,

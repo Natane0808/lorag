@@ -129,10 +129,6 @@ impl From<RawConfig> for AppConfig {
 // =============================================================================
 
 /// 运行时配置。所有字段在 [`AppConfig::validate`] 阶段会做合法性检查。
-///
-/// **注**：原本有 `EMBED_DIM` 字段（用户自己配向量的维度），现在不再需要——
-/// `AhaClient::embed_dim()` 在 load 模型后从 `config.json::hidden_size` 读出来，
-/// lancedb schema 跟模型走。改 embed 模型不再需要同时改 config 了。
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     /// LLM 模型 id（aha WhichModel 接受的字符串，如 `Qwen/Qwen3-4B`）。
