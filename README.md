@@ -23,10 +23,11 @@
 - **M8 流式输出**：aha → lorag mpsc 通道，token 级逐字打印；CPU 跑 4B 不再"干等 15-30 秒"
 - **M8 4 层防注入**：① sanitize ② chunk 边界包裹 ③ 系统 prompt 5 条铁律 ④ recency bias 尾注
 - **M9 混合检索（opt-in）**：SQLite FTS5 BM25 + 向量 RRF 融合，大文档量时开启
+- **M10 Web UI**：`lorag serve` 启动 axum + SolidJS + daisyUI，浏览器聊天界面，SSE 流式渲染
 - **M8 Prompt 可配置**：4 个 `PROMPT_*` 字段覆盖默认（默认含 5 条防注入铁律）
 - **可观测**：每步 ingestion 打印进度；query 跑出 RAG 命中 / fallback
 - **GPU 加速可选**：默认 CPU 跑；NVIDIA GPU 加 `--features cuda`
-- **明确不做**：Web UI（M10 计划）/ 工具调用（Backlog）
+- **明确不做**：工具调用（Backlog）
 
 ---
 
@@ -146,6 +147,8 @@ lorag chat                          # 多轮对话 REPL（带 SQLite 历史 + RA
     --no-hybrid
     --top-k <N>
 
+lorag serve [--port <N>]                # 启动 Web UI（axum + SolidJS，localhost:3000）
+
 lorag doctor                        # 11 项环境检查（env / models / storage / features）
 ```
 
@@ -244,7 +247,7 @@ lorag/
 - ✅ M7.1 Rerank（可选）：Qwen3-Reranker 懒加载 + `--no-rerank` + `RERANK_TOP_N` 可配
 - ✅ M8 流式输出 + 4 层防注入 + 4 个 PROMPT_* 可配 + XLSX 多 sheet 行前缀
 - ✅ M9 混合检索（SQLite FTS5 BM25 + 向量 RRF 融合，opt-in）—— 默认关闭，大文档量时开启（`DFDB` / 数字日期都召回失败）
-- 📋 M10 Web UI（axum server + 浏览器 + HTMX）—— 前置依赖 M8
+- ✅ M10 Web UI（`lorag serve` → axum + SolidJS + daisyUI，SSE 流式浏览器聊天界面）
 - 📋 M11 CI（Codeberg CI / `.forgejo/workflows/ci.yml`）
 - 📋 M12 MCP server（把 `lorag` 暴露成 MCP tools，让 IDE agent 直接调）
 - 📋 Backlog：tool calling / 多知识库 / 模型量化 / 评估框架增强 / rerank 价值验证 / 发布到 crates.io

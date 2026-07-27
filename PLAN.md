@@ -1,6 +1,6 @@
 ﻿# lorag — 规划 (v0.1)
 
-> **状态**：M0–M8 全部实装。下一步：混合检索（M9）→ Web UI（M10）→ CI（M11）→ MCP（M12）。详见 §11。
+> **状态**：M0–M10 全部实装。下一步：CI（M11）→ MCP（M12）。详见 §11。
 > 历史细节见 [CHANGELOG.md](CHANGELOG.md)。
 
 ---
@@ -398,8 +398,7 @@ lorag doctor                        # 11 项环境检查（env / models / storag
 6. **同步摄入**：超大文件（>100MB）可能 OOM；后续可改流式。
 7. **rerank hard case 未验证**：generic 14/17 测试 rerank on/off 都 14/17，无质量差异；rerank 价值预期在 hard case（top-5 召回错但 top-50 里有），待真业务问题验证。
 8. **Windows 文件锁**：Zed 编辑器打开时 rust-analyzer 会锁 `data/lorag.db`，关闭 Zed 才能 `lorag reindex` 删库。
-9. **流式输出仅 CLI 端**：当前只有 `lorag query` / `lorag chat` 走 token 级流式。Web UI（M10）需 HTTP SSE 复用同一管线；M9 之前无 SSE server。
-10. **防注入仅 RAG 模式生效**：`sanitize_user_input` + chunk 边界包裹只在 RAG 模式（`--no-rag` 关闭时）启用。`--no-rag` 走裸 LLM，无上下文隔离，理论上 prompt injection 风险更高——故意保留，因为这是用户"绕开 RAG 聊纯 LLM"的本意。
+9. **防注入仅 RAG 模式生效**：`sanitize_user_input` + chunk 边界包裹只在 RAG 模式（`--no-rag` 关闭时）启用。`--no-rag` 走裸 LLM，无上下文隔离，理论上 prompt injection 风险更高——故意保留，因为这是用户"绕开 RAG 聊纯 LLM"的本意。
 
 ---
 
@@ -499,14 +498,19 @@ FTS5 的 `unicode61` tokenizer 对中文按单字切。**双引号包 query 做�
 - 默认关闭（HYBRID_ENABLED=false）：小数据集下向量检索已覆盖大部分文档，混合检索无额外收益。大文档量（100+ 文件）时开启。
 - --no-hybrid CLI flag 支持临时关闭。混合检索启用时跳过 rerank（RRF 直接输出 top_k）。
 
-**M10：Web UI**
-- 当前 `lorag chat` 是终端 REPL，RAG 答案含 Markdown/代码时体验差。浏览器天然适合渲染富文本。
-- 方案：`lorag serve` 命令启动 axum server（localhost），前端纯 HTML + HTMX（无需 npm）。
-  - `GET /` → 静态聊天界面
-  - `POST /api/chat` → SSE 流式（复用 M8 SSE 管线）
+**✅ M10：Web UI（已完成）**
+- 实现：`lorag serve` 启动 axum HTTP server（localhost:3000），前端 SolidJS + Vite + daisyUI + Tailwind CSS。
+  - `POST /api/chat` → SSE 流式多轮对话（复用 M8 `llm_complete_stream` 管线）
   - `POST /api/query` → 一次性 RAG 问答
-- 选型：Web UI > 桌面 GUI。浏览器免费提供 Markdown 渲染、代码高亮、SSE 流式消费。GUI（egui/iced）需手写所有控件，开发成本更高。
-- 预估：~500–800 行。**前置依赖**：M8（流式输出）。新增依赖：`axum`。
+  - `GET /api/status` → 系统信息（模型、文档数、chunk 数）
+  - `GET /api/sessions` → 对话历史列表 + `DELETE /api/sessions/{id}` 删除
+  - `GET /*` → 嵌入式前端（`rust-embed` 打包到二进制，零外部依赖）
+- 前端功能：多轮 RAG 聊天 / 流式 SSE 逐 token 渲染 / 暗色自动 / daisyUI 主题切换 / 对话历史侧边栏（按日期分组 + 删除）/ 欢迎页推荐问题
+- 前端开发：`cd web && bun dev`（Vite hot reload + `/api/*` 代理到 axum）
+- 生产构建：`cd web && bun run build && cargo build --features cuda` → 单二进制含前端
+- 选型变化：最初计划 HTMX（无 npm），实测改为 SolidJS——聊天界面交互密集（流式渲染、历史切换、删除确认），HTMX 的 hx-swap 难以精细控制 SSE 流。前端仍 npm-free 部署（build 产物嵌入二进制）。
+- key bugs fixed（本轮）：① aiIdx 差一错误（Solid batch 导致 AI 消息永不显示）② 侧边栏流结束后不刷新（消息 persistence 在 SSE done 之后）③ 删除按钮 HTML 嵌套 button 警告
+- 预估：~1200 行 Rust + ~400 行 TSX。新增依赖：`axum`、`tower-http`、`tokio-stream`、`async-stream`、`rust-embed`。前端：`solid-js`、`daisyui`、`vite`、`@tailwindcss/vite`、`vite-plugin-solid`。
 
 ### 🟡 中期（M11–M12）
 

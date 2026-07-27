@@ -8,13 +8,13 @@
 
 ## 1. 项目速读（一分钟版本）
 
-- **目标**：本地 Agent RAG CLI。ingest 多格式文档入 LanceDB + SQLite，query / chat 一次性 RAG 问答。
-- **栈**：Rust 2021 + `aha`（**path 依赖**）+ `rig` **0.40** + `lancedb` 0.30 + `rusqlite` + `clap` v4。
-- **当前**：v0.1（codeberg / MIT）。M0–M8 全实装（含流式输出、4 层防注入、4 个 PROMPT_* 可配、XLSX 多 sheet 行前缀）。详见 [PLAN.md §1](PLAN.md)。
+- **目标**：本地 Agent RAG CLI + Web UI。ingest 多格式文档入 LanceDB + SQLite，query / chat RAG 问答，`lorag serve` 启动浏览器聊天界面。
+- **栈**：Rust 2021 + `aha`（**path 依赖**）+ `rig` **0.40** + `lancedb` 0.30 + `rusqlite` + `clap` v4。Web UI：SolidJS + Vite + Bun + daisyUI。
+- **当前**：v0.1（codeberg / MIT）。M0–M10 全实装（含流式输出、混合检索、Web UI、4 层防注入、4 个 PROMPT_* 可配）。详见 [PLAN.md §1](PLAN.md)。
 - **LLM/embedding 推理**：aha **crate**（不起 HTTP server），通过 rig 0.40 的 `CompletionClient` / `EmbeddingsClient` 把 aha 装进 rig（**不**实现 `Provider` trait，0.40 的 `Provider` 是给 HTTP-based provider 用的）。
-- **推迟到下个 milestone**：Web UI（M10） / 混合检索（M9） / tool calling（Backlog）。流式输出 M8 已实装。
-- **端到端命令**：`lorag models pull && lorag ingest <path> && lorag query "..."`。
-- **当前能跑**：`lorag init` / `lorag ingest`（6 种格式）/ `lorag query` / `lorag chat`（**RAG 端到端，绕开 `dynamic_context` 62GB bug**；M8 起 token 级流式 + 4 层防注入 + 4 个 PROMPT_* 可配）/ `lorag reindex` / `lorag sources list` / `lorag doctor`（11 项环境检查）。
+- **推迟到下个 milestone**：CI（M11） / MCP server（M12） / tool calling（Backlog）。
+- **端到端命令**：`lorag models pull && lorag ingest <path> && lorag query "..."`，或 `lorag models pull && lorag ingest <path> && lorag serve`。
+- **当前能跑**：`lorag init` / `lorag ingest`（6 种格式）/ `lorag query` / `lorag chat`（**RAG 端到端，绕开 `dynamic_context` 62GB bug**；M8 起 token 级流式 + 4 层防注入 + 4 个 PROMPT_* 可配）/ `lorag serve`（M10 Web UI：axum + SolidJS，SSE 流式聊天）/ `lorag reindex` / `lorag sources list` / `lorag doctor`（11 项环境检查）。
 
 > 动代码前**先**读 [PLAN.md](PLAN.md) 整个文件 + 本文件 + 涉及的具体 `src/<module>.rs` 顶部 doc 注释。
 
@@ -92,7 +92,8 @@ config ──┬──→ aha_provider ─────┐    （★ 唯一 aha �
          ├──→ rag ──────────────┤    （手写 embed + lancedb native + FTS5 hybrid + RRF + rerank；**绕过 dynamic_context**）
          ├──→ chunker ──────────┤
          ├──→ ingest ───────────┤    （6 种 loader + pipeline）
-         ├──→ store ────────────┘    （lancedb + sqlite；store::lancedb_store 还管 HNSW 索引）
+         ├──→ store ────────────┤    （lancedb + sqlite；store::lancedb_store 还管 HNSW 索引）
+         ├──→ server ───────────┤    （M10 axum HTTP server + 嵌入式前端，SSE 流式 API）
          └──→ main (CLI)
 ```
 
@@ -103,6 +104,7 @@ config ──┬──→ aha_provider ─────┐    （★ 唯一 aha �
 - **`rag` 模块**（`src/rag.rs`）：M0–M8 累积。**M7 前**：`rag_query` / `bare_llm_query` / `retrieve_chunks` / `llm_complete` / `build_chat_preamble` / `is_recoverable_error`。**M8 新增**：`llm_complete_stream`（流式版 `llm_complete`，返 `mpsc::Receiver<Result<String>>`）/ `sanitize_user_input`（防注入 1 层：转义 ChatML token + HTML 实体）/ `format_chunks_for_context`（防注入 2 层：每 chunk `[文档片段 N]...[/文档片段 N]` 边界包裹）/ `build_rag_preamble`（RAG 模式 prompt 拼装）/ 重构后的 `build_chat_preamble(cfg, history, chunks)`（多轮模式 prompt 拼装）。上层（cmd_query / cmd_chat）一律走这些，不直接调 lancedb / rig / aha。
 - **`store`**：对外只暴露具体方法，不暴露 `rusqlite::Connection` / `lancedb::Table`。
 - **`ingest::loader` 各子模块**只负责"文件 → 纯文本"，不知道 LanceDB / SQLite 存在。
+- **`server`**（`src/server.rs`）：M10 axum HTTP server。路由：`POST /api/chat`（SSE 流式多轮）/ `POST /api/query`（SSE RAG）/ `GET /api/status` / `GET /api/sessions` / `DELETE /api/sessions/{id}` / `GET /*`（嵌入式前端 `rust-embed`）。依赖 `ahap_provider`、`config`、`rag`、`store::sqlite_store`，不直接调 lancedb。
 - **本项目没有 `aha_runner` 模块**——所有 aha 交互（推理 + 下载）都在 `aha_provider` 内完成。
 
 新加模块时，先在 [PLAN.md §5](PLAN.md) 标位置，然后才写代码。
@@ -237,6 +239,10 @@ config ──┬──→ aha_provider ─────┐    （★ 唯一 aha �
 | `sha2` + `hex` + `chrono` | 源文件 hash + 时间戳 | |
 | `tempfile` | 测试 | dev-dep |
 | `rig-lancedb` 0.40 | **不直接使用**（绕开 dynamic_context 62GB bug；保留依赖备选 / 未来） | — |
+| `axum` 0.8 | M10 Web UI HTTP server（`lorag serve`） | 含 `json` feature |
+| `tower-http` 0.6 | M10 CORS / middleware | |
+| `tokio-stream` 0.1 + `async-stream` 0.3 | M10 SSE 流式响应 | |
+| `rust-embed` 8 | M10 嵌入式前端 | 打包 `web/dist/` 到二进制 |
 
 加新依赖前**先**在这里登记。
 

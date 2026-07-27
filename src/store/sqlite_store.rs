@@ -11,7 +11,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use rusqlite::params;
 
-use crate::models::{Chunk, MessageRecord, SourceRecord};
+use crate::models::{Chunk, MessageRecord, SessionInfo, SourceRecord};
 
 /// SQLite 元数据存储句柄。
 pub struct SqliteStore {
@@ -366,6 +366,74 @@ impl SqliteStore {
                 |row| row.get(0),
             )
             .context("failed to count session messages")
+    }
+
+    /// 删除指定 session 及其所有消息。
+    ///
+    /// 返回被删除的行数；session 不存在则返回 Ok(0)，不算错误。
+    pub fn delete_session(&self, session_id: &str) -> Result<usize> {
+        let n = self
+            .conn
+            .execute(
+                "DELETE FROM messages WHERE session_id = ?1",
+                params![session_id],
+            )
+            .context("failed to delete session messages")?;
+        Ok(n)
+    }
+
+    /// 列出所有会话（M10 侧边栏历史列表）。
+    ///
+    /// 每个会话取：id、首条 user 消息作标题、消息数、最后更新时间。
+    /// 按更新时间倒序排列。
+    pub fn list_sessions(&self) -> Result<Vec<SessionInfo>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT s.session_id,
+                        COALESCE(
+                            (SELECT content FROM messages
+                             WHERE session_id = s.session_id AND role = 'user'
+                             ORDER BY ordinal ASC LIMIT 1),
+                            ''
+                        ) AS title,
+                        s.cnt AS message_count,
+                        s.updated_at
+                 FROM (
+                     SELECT session_id,
+                            COUNT(*) AS cnt,
+                            MAX(created_at) AS updated_at
+                     FROM messages
+                     GROUP BY session_id
+                 ) s
+                 ORDER BY s.updated_at DESC",
+            )
+            .context("failed to prepare list_sessions query")?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                let title: String = row.get(1)?;
+                // 标题截断到 40 字
+                let short = if title.chars().count() > 40 {
+                    let truncated: String = title.chars().take(40).collect();
+                    format!("{truncated}…")
+                } else {
+                    title
+                };
+                Ok(SessionInfo {
+                    session_id: row.get(0)?,
+                    title: short,
+                    message_count: row.get(2)?,
+                    updated_at: row.get(3)?,
+                })
+            })
+            .context("failed to query sessions")?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
     }
 }
 

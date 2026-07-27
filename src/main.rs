@@ -149,6 +149,13 @@ enum Command {
     /// 诊断环境：检查 .env / 模型文件 / 存储路径 / 编译 feature
     Doctor,
 
+    /// 启动 Web UI 服务器（SolidJS + axum，M10）
+    Serve {
+        /// 监听端口（默认 3000）
+        #[arg(long, default_value_t = 3000)]
+        port: u16,
+    },
+
     /// 清掉 LanceDB + SQLite 后重新摄入（换 embedding 模型后必须走这个）
     Reindex {
         /// 一个或多个文件 / 目录
@@ -287,6 +294,7 @@ fn run(cli: Cli) -> Result<()> {
                 .await
             }
             Command::Doctor => cmd_doctor(&cfg),
+            Command::Serve { port } => cmd_serve(&cfg, port).await,
             Command::Reindex {
                 paths,
                 ext,
@@ -916,6 +924,35 @@ fn cmd_doctor(cfg: &config::AppConfig) -> Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// `lorag serve` — 启动 Web UI（axum HTTP server, M10）。
+///
+/// 启动时 load LLM + embedding 模型到内存，然后在指定端口监听。
+/// 前端由 Vite dev server（开发期）或 axum ServeDir（生产期）提供。
+async fn cmd_serve(cfg: &config::AppConfig, port: u16) -> Result<()> {
+    use std::sync::Arc;
+
+    use lorag::aha_provider::AhaClient;
+    use lorag::server::{self, AppState};
+    use lorag::store::sqlite_store::SqliteStore;
+
+    println!("loading models (10s~minutes first time, seconds after)...");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    let client = AhaClient::init(cfg.clone())
+        .await
+        .context("failed to init AhaClient — try `lorag models status` first")?;
+
+    let sqlite = SqliteStore::open(&cfg.sqlite_path)
+        .with_context(|| format!("failed to open sqlite at {}", cfg.sqlite_path.display()))?;
+
+    let state = Arc::new(AppState {
+        client: Arc::new(tokio::sync::Mutex::new(client)),
+        cfg: Arc::new(cfg.clone()),
+        sqlite: Arc::new(tokio::sync::Mutex::new(sqlite)),
+    });
+
+    server::start(state, port).await
 }
 
 /// `lorag reindex` —— 删 LanceDB + SQLite 后重新摄入。

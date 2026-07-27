@@ -72,6 +72,13 @@ chrono = { version = "0.4", features = ["serde"] }
 arrow-array = "58"
 arrow-schema = "58"
 
+# ===== M10: Web UI (axum HTTP server) =====
+axum = { version = "0.8", features = ["json"] }
+tower-http = { version = "0.6", features = ["cors"] }
+tokio-stream = "0.1"
+async-stream = "0.3"
+rust-embed = "8"
+
 # ===== Feature flags（passthrough 到 aha）=====
 # 默认 CPU 推理（candle 默认 backend）。要 GPU 加速时选对应 feature。
 #

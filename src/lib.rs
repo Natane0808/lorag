@@ -10,4 +10,5 @@ pub mod ingest;
 pub mod models;
 pub mod rag;
 pub mod rig_compat;
+pub mod server;
 pub mod store;

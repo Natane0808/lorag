@@ -10,6 +10,19 @@ lorag 的历史变更记录。**当前**架构 / 决策 / 限制见 [PLAN.md](PL
 
 **当前 release**：MIT / codeberg，rust 2021，0.1.0 crate version。
 
+### Unreleased（M10 Web UI）
+
+### M10 — Web UI（SolidJS + axum + daisyUI）
+
+- **`lorag serve`**：axum HTTP server（localhost:3000，`--port` 可配）。嵌入式前端（`rust-embed` 打包 `web/dist/` 到二进制），部署零外部依赖。
+- **前端架构**：SolidJS + Vite 8 + Bun + daisyUI 5（Tailwind CSS 4）。开发期 `bun dev`，生产期 `bun run build && cargo build --features cuda`。
+- **API 端点**：`POST /api/chat`（SSE 流式多轮）/ `POST /api/query`（SSE RAG）/ `GET /api/status` / `GET /api/sessions`（历史列表）/ `DELETE /api/sessions/{id}`（删除）/ `GET /*`（嵌入式前端）。
+- **前端功能**：SSE token 级流式 / daisyUI 明暗主题 / 侧边栏（按日期分组 + 删除）/ 欢迎页推荐问题 / 移动端响应式。
+- **关键 bug fix**：aiIdx 差一错误（AI 消息永不显示）/ 侧边栏流结束后不刷新 / 嵌套 button HTML 警告 → `div[role=button]`。
+- **新增后端依赖**：`axum` 0.8 / `tower-http` 0.6 / `tokio-stream` 0.1 / `async-stream` 0.3 / `rust-embed` 8。
+- **前端依赖**：`solid-js` 1.9 / `daisyui` 5.7 / `vite` 8.1 / `@tailwindcss/vite` 4.3 / `vite-plugin-solid` 2.11 / TypeScript 6.0。
+- Commit: (pending)
+
 ### Unreleased（M7.1 之后的小修）
 
 - **drop `--session <ID>` + `/reset`**：chat 进程内连续，跨进程不续接。session_id 内部仍生成（sqlite 主键需要），但用户感知不到。`/status` 不再显示 session_id，banner 不显示。

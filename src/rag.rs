@@ -166,25 +166,18 @@ pub async fn llm_complete_stream(
     client.llm_generate_stream(params).await
 }
 
-/// **低层**：embed question + lancedb vector_search +（可选）FTS5 BM25 → RRF 融合 → top_k chunks。
+/// **低层**：embed question + lancedb vector_search +（可选）FTS5 BM25 → RRF 融合 → top_k chunks (Send-safe).
 ///
 /// 不调 LLM；不拼 context。RAG 失败时返回 `Err`，调用方决定要不要 fallback 到裸 LLM。
 ///
-/// **混合检索**（当 `sqlite.is_some() && enable_hybrid`）：
-/// 1. 向量搜索取 `top_k * 3` 条
-/// 2. FTS5 BM25 搜索取 `top_k * 3` 条
-/// 3. RRF 融合 → top_k
-///
-/// **纯向量路径**（`sqlite.is_none() || !enable_hybrid`）：
-/// 直接 vector_search + 可选 rerank，行为同 M8。
+/// 不接收 `&SqliteStore`（`!Sync`），因此 `Send` 安全，可在 axum handler / `async_stream::stream!`
+/// 内部直接调用。混合检索暂不支持（传 `sqlite` 的版本见 [`retrieve_chunks`]）。
 #[allow(clippy::too_many_arguments)]
-pub async fn retrieve_chunks(
+pub async fn retrieve_chunks_send(
     client: &AhaClient,
     cfg: &AppConfig,
-    sqlite: Option<&SqliteStore>,
     question: &str,
     top_k: usize,
-    enable_hybrid: bool,
     enable_rerank: bool,
     rerank_top_n: usize,
 ) -> Result<Vec<String>> {
@@ -228,13 +221,8 @@ pub async fn retrieve_chunks(
         )?;
 
     // ── 3. vector_search limit ──
-    //   混合检索时取更多候选（top_k × 3）给 RRF 融合留空间
-    //   rerank-only 时按 rerank_top_n 取；纯向量时按 top_k 取
-    let should_hybrid = enable_hybrid && sqlite.is_some();
     let should_rerank = enable_rerank && client.has_rerank();
-    let fetch_limit = if should_hybrid {
-        top_k.saturating_mul(3).max(10)
-    } else if should_rerank {
+    let fetch_limit = if should_rerank {
         top_k.max(rerank_top_n)
     } else {
         top_k
@@ -278,27 +266,8 @@ pub async fn retrieve_chunks(
         );
     }
 
-    // ── 5. 混合检索（如果启用）──
-    if should_hybrid {
-        let sqlite = sqlite.unwrap(); // 上面 should_hybrid 已经保证 Some
-        match sqlite.search_fts(question, fetch_limit) {
-            Ok(fts_chunks) if !fts_chunks.is_empty() => {
-                chunks = rrf_merge(&chunks, &fts_chunks, top_k, 60);
-            }
-            Ok(_) => {
-                // FTS5 返回空 → 纯向量结果即可
-            }
-            Err(e) => {
-                tracing::warn!("FTS5 search failed, falling back to vector-only: {e:#}");
-            }
-        }
-        return Ok(chunks); // 混合检索结果直接返回（不再走 rerank）
-    }
-
-    // ── 6. rerank 路径（纯向量模式 + 启用 rerank）──
+    // ── 5. rerank 路径 ──
     if should_rerank {
-        // 已经 ensure 过：has_rerank() 返回 true 说明 slot 填了；不会二次 ensure
-        // 防御性：万一 slot 仍空，ensure 一次
         if !client.has_rerank() {
             client
                 .ensure_rerank()
@@ -316,7 +285,6 @@ pub async fn retrieve_chunks(
                 chunks.len()
             );
         }
-        // 按分数降序排（同分时保持原顺序稳定）
         let mut indexed: Vec<(usize, f32)> = scores.iter().copied().enumerate().collect();
         indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         let top: Vec<String> = indexed
@@ -325,6 +293,43 @@ pub async fn retrieve_chunks(
             .map(|(i, _)| chunks[i].clone())
             .collect();
         return Ok(top);
+    }
+
+    Ok(chunks)
+}
+
+/// 带 SQLite FTS5 的完整混合检索（`!Send`：含 `&SqliteStore`，不能跨线程共享）。
+///
+/// CLI 用这个；Web server 用 [`retrieve_chunks_send`]。
+#[allow(clippy::too_many_arguments)]
+pub async fn retrieve_chunks(
+    client: &AhaClient,
+    cfg: &AppConfig,
+    sqlite: Option<&SqliteStore>,
+    question: &str,
+    top_k: usize,
+    enable_hybrid: bool,
+    enable_rerank: bool,
+    rerank_top_n: usize,
+) -> Result<Vec<String>> {
+    let should_hybrid = enable_hybrid && sqlite.is_some();
+
+    // 纯向量检索（Send-safe core）
+    let mut chunks =
+        retrieve_chunks_send(client, cfg, question, top_k, enable_rerank, rerank_top_n).await?;
+
+    // 混合检索叠加
+    if should_hybrid {
+        let sqlite = sqlite.unwrap();
+        match sqlite.search_fts(question, top_k.saturating_mul(3).max(10)) {
+            Ok(fts_chunks) if !fts_chunks.is_empty() => {
+                chunks = rrf_merge(&chunks, &fts_chunks, top_k, 60);
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!("FTS5 search failed, falling back to vector-only: {e:#}");
+            }
+        }
     }
 
     Ok(chunks)
