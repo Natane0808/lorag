@@ -20,9 +20,12 @@
 - **6 种格式摄入**：pdf / docx / pptx / xlsx / md / txt，sha256 幂等
 - **多轮对话**：REPL 带 SQLite 历史 + RAG 检索
 - **可选 rerank**：配 `RERANK_MODEL=` 即启用（aha `Qwen3-Reranker-0.6B`），召回 +15-25%
+- **M8 流式输出**：aha → lorag mpsc 通道，token 级逐字打印；CPU 跑 4B 不再"干等 15-30 秒"
+- **M8 4 层防注入**：① sanitize ② chunk 边界包裹 ③ 系统 prompt 5 条铁律 ④ recency bias 尾注
+- **M8 Prompt 可配置**：4 个 `PROMPT_*` 字段覆盖默认（默认含 5 条防注入铁律）
 - **可观测**：每步 ingestion 打印进度；query 跑出 RAG 命中 / fallback
 - **GPU 加速可选**：默认 CPU 跑；NVIDIA GPU 加 `--features cuda`
-- **明确不做**：Web UI / 工具调用（见 [PLAN.md §11](PLAN.md) 触发条件）
+- **明确不做**：Web UI（M10 计划）/ 工具调用（Backlog）
 
 ---
 
@@ -53,9 +56,10 @@ lorag chat
 
 **默认模型**（4B LLM + 0.6B Embedding 起步，性价比最优点）：
 
-- LLM：`Qwen/Qwen3-4B`（CUDA 1-3s/query，CPU 15-30s/query；想要更快换 `Qwen3-1.7B` / `0.6B`）
+- LLM：`Qwen/Qwen3-4B`（CUDA 1-3s/query，CPU 15-30s/query；M8 起 token 级流式输出，不再"干等 30s"）
 - Embedding：`Qwen/Qwen3-Embedding-0.6B`（1024 维，质量比 MiniLM 显著好；维度自动读，不用配）
 - Rerank（**可选**）：`Qwen/Qwen3-Reranker-0.6B`（**留空 = 禁用**，懒加载，第一次 query 才 load）
+- **Prompt 可配置**（M8）：4 个 `PROMPT_*` 字段覆盖默认（默认含 5 条防注入铁律 + recency bias 尾注，详见 [`.env.example`](.env.example)）
 
 > **CUDA 推荐**：`cargo build --features cuda` 重 build 一次，4B 在 RTX 4080 SUPER 上能跑到 1-3s/query。
 > **0.6B 起步**也行：纯 CPU 也能跑（~5s/query），但 LLM 答非所问率较高，复杂问题会失望。
@@ -126,16 +130,16 @@ lorag reindex <PATH>...             # 清 LanceDB + SQLite 后重新 ingest（�
 
 lorag sources list [--json]         # 列出已摄入文件
 
-lorag query <QUESTION>              # 一次性 RAG 问答
+lorag query <QUESTION>              # 一次性 RAG 问答（M8 起 token 级流式输出）
     --top-k <N>                     # 覆盖 cfg.top_k
     --no-rerank                     # 跳过 rerank（即使 .env 配了 RERANK_MODEL）
     --rerank-top-n <N>              # 覆盖 cfg.rerank_top_n
 
-lorag chat                          # 多轮对话 REPL（带 SQLite 历史 + RAG；进程内连续，跨进程不续接）
+lorag chat                          # 多轮对话 REPL（带 SQLite 历史 + RAG；M8 起 token 级流式输出；进程内连续，跨进程不续接）
     --message <TEXT>                # 一次性首问（不读 stdin）
     --no-history                    # 不带历史（每轮独立）
     --no-banner                     # 安静启动
-    --no-rag                        # 纯 LLM 对话
+    --no-rag                        # 纯 LLM 对话（关闭 RAG 上下文；防注入 1-2 层不生效）
     --no-rerank / --rerank-top-n <N>
     --top-k <N>
 
@@ -230,11 +234,12 @@ lorag/
 - ✅ M6：`lorag doctor` 11 项环境检查
 - ✅ M7 `lorag chat`：多轮 REPL + SQLite 历史 + RAG fallback
 - ✅ M7.1 Rerank（可选）：Qwen3-Reranker 懒加载 + `--no-rerank` + `RERANK_TOP_N` 可配
-- ✅ M8 流式输出：token 级逐字打印（aha → lorag mpsc 通道）
-- 📋 Web UI（axum）
-- 📋 MCP server（把 `lorag` 暴露成 MCP tools，让 IDE agent 能直接调）
-- 📋 混合检索（SQLite FTS5 BM25 + 向量 RRF 融合）
-- 📋 工具调用（aha 是否支持 function calling 待确认）
+- ✅ M8 流式输出 + 4 层防注入 + 4 个 PROMPT_* 可配 + XLSX 多 sheet 行前缀
+- 📋 M9 混合检索（SQLite FTS5 BM25 + 向量 RRF 融合）—— 纯向量对关键词不敏感（`DFDB` / 数字日期都召回失败）
+- 📋 M10 Web UI（axum server + 浏览器 + HTMX）—— 前置依赖 M8
+- 📋 M11 CI（Codeberg CI / `.forgejo/workflows/ci.yml`）
+- 📋 M12 MCP server（把 `lorag` 暴露成 MCP tools，让 IDE agent 直接调）
+- 📋 Backlog：tool calling / 多知识库 / 模型量化 / 评估框架增强 / rerank 价值验证 / 发布到 crates.io
 
 完整规划见 [`PLAN.md`](PLAN.md)；按优先级和触发条件标在 [PLAN.md §11](PLAN.md)。
 
