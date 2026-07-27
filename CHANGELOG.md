@@ -10,6 +10,21 @@ lorag 的历史变更记录。**当前**架构 / 决策 / 限制见 [PLAN.md](PL
 
 **当前 release**：MIT / codeberg，rust 2021，0.1.0 crate version。
 
+### Unreleased（M10.1 — Mermaid 图表渲染）
+
+- **Mermaid 图表渲染**：Web UI 聊天界面里 LLM 回复的 ` ```mermaid … ``` ` 代码块自动渲染成 SVG 图表（同主题色 + 响亮 Mermaid `default` / `dark` 主题随 daisyUI 主题切换初始化一次）。
+- **架构**：
+  - `web/src/utils/markdown.ts`：`extractMermaidBlocks` 预提取完整 mermaid 块并替换为 `M10MERMAIDTOKEN${counter}END` 占位符（避免 marked tokenize 块内语法 / 流式未闭合时不误提取）；`restoreMermaidBlocks` 在 marked 输出后把占位符换回 `<div class="mermaid-pending" data-source="…">`。
+  - `web/src/utils/mermaid.ts`：单例 `mermaid.initialize` + 串行 microtask 队列防并发 `mermaid.render` ID 冲突 + `svgCache: Map<source, svg>` 跨流式 token 复用 SVG (同样 source 重现时立即恢复，不重复渲染)；渲染失败降级显示原码 + 错误消息。
+  - `MessageBubble.tsx`：内容不再用 `innerHTML={html()}` 绑定，改 `createEffect + applyHtml(contentRef, html)` 命令式设值，这样 mermaid 节点能在每次重 render 时根据 svgCache 缓存自动复原。
+- **CSS**：`.md-content .mermaid-rendered / .mermaid-loading / .mermaid-error` 状态类依次过渡，与 daisyUI `--b1` / `--er` oklch 变量同步。
+- **依赖**：`mermaid@^11.12`（含 50+ diagram types，Vite 默认 code-split 只加载用到的那种）。
+- **限制**：MVP 主题跟随页面初始化状态，后期切换主题不会重新渲染已有图表（仅新块会跟随）。
+- **已知问题修复**：
+  - **占位符字符集 bug**：第一版用 `{{__MERMAID_N__}}`，但 `__MERMAID_0__` 被 marked 当 GFM strong emphasis 处理 → `<strong>MERMAID_0</strong>`，剩下 `{{`/`}}` 单独可见，restore 正则匹配不到完整 token。修复：占位符改成无歧义字符 `M10MERMAIDTOKEN${counter}END`（详见 [PLAN.md §10.9](PLAN.md)）。
+  - **SVG 显示过小**：timeline / gantt 这类扁平图 viewBox 比例 ~7:1，CSS 原 `max-width: 100%` 让浏览器按比例缩到容器宽、高度被压成 ~108px，文字看不清。修复：改为 `width: 100%`，让 SVG 撑满容器宽度，viewBox 比例由 `height: auto` 保留。
+- Commit: (pending)
+
 ### Unreleased（M10 Web UI）
 
 ### M10 — Web UI（SolidJS + axum + daisyUI）

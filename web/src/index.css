@@ -7,3 +7,202 @@
 html {
   scroll-behavior: smooth;
 }
+
+/* ── Markdown content styles (inside .md-content) ── */
+
+.md-content h1 { font-size: 1.25rem; font-weight: 700; margin: 1em 0 0.5em; line-height: 1.3; }
+.md-content h2 { font-size: 1.1rem;  font-weight: 600; margin: 0.9em 0 0.4em; line-height: 1.3; }
+.md-content h3 { font-size: 1rem;    font-weight: 600; margin: 0.8em 0 0.3em; line-height: 1.3; }
+.md-content h4,
+.md-content h5,
+.md-content h6 { font-size: 0.9rem;  font-weight: 600; margin: 0.7em 0 0.25em; }
+
+.md-content h1:first-child,
+.md-content h2:first-child,
+.md-content h3:first-child,
+.md-content h4:first-child { margin-top: 0; }
+
+/* Paragraphs */
+.md-content p { margin: 0.35em 0; }
+.md-content p:first-child { margin-top: 0; }
+.md-content p:last-child { margin-bottom: 0; }
+
+/* Inline code */
+.md-content code:not(pre code) {
+  padding: 0.15em 0.4em;
+  border-radius: 4px;
+  font-size: 0.85em;
+  font-family: "SF Mono", "Fira Code", "Cascadia Code", "Consolas", monospace;
+  background: oklch(var(--b3) / 0.5);
+  color: oklch(var(--bc) / 0.85);
+}
+
+/* Code blocks */
+.md-content pre {
+  margin: 0.5em 0;
+  border-radius: 10px;
+  overflow-x: auto;
+  font-size: 0.82em;
+  line-height: 1.5;
+  background: oklch(var(--b3) / 0.6);
+  border: 1px solid oklch(var(--b3) / 0.8);
+}
+
+.md-content pre code {
+  display: block;
+  padding: 0.9em 1em;
+  background: transparent;
+  font-family: "SF Mono", "Fira Code", "Cascadia Code", "Consolas", monospace;
+}
+
+/* Inline code inside links — don't double-background */
+.md-content a code {
+  background: transparent;
+  padding: 0;
+}
+
+/* Blockquotes */
+.md-content blockquote {
+  margin: 0.5em 0;
+  padding: 0.4em 0.9em;
+  border-left: 3px solid oklch(var(--p) / 0.35);
+  color: oklch(var(--bc) / 0.65);
+  font-style: italic;
+}
+
+.md-content blockquote p { margin: 0.15em 0; }
+
+/* Lists
+   ── Note: Tailwind v4 preflight resets `list-style: none` on ul/ol,
+      so we explicitly restore disc/decimal here. */
+.md-content ul,
+.md-content ol {
+  margin: 0.35em 0;
+  padding-left: 1.6em;
+  list-style-position: outside;
+}
+
+.md-content ul    { list-style-type: disc; }
+.md-content ol    { list-style-type: decimal; }
+
+.md-content li { margin: 0.15em 0; }
+.md-content li::marker { color: oklch(var(--p) / 0.65); }
+.md-content li p { margin: 0; }
+
+/* Nested lists */
+.md-content ul ul { list-style-type: circle; }
+.md-content ol ol { list-style-type: lower-alpha; }
+.md-content ul ol,
+.md-content ol ul { margin: 0.15em 0; }
+
+/* Tables
+   ── Use Tailwind `@apply` directives instead of CSS variables so colors
+      are guaranteed to resolve through Tailwind's processing pipeline. */
+.md-content table {
+  @apply w-full my-3 text-sm border-collapse border border-base-content/30 rounded-lg overflow-hidden;
+  border-spacing: 0;
+}
+
+.md-content th,
+.md-content td {
+  @apply px-4 py-2.5 text-left align-top border-r border-b border-base-content/15;
+}
+
+.md-content th:last-child,
+.md-content td:last-child { @apply border-r-0; }
+
+.md-content tbody tr:last-child td { @apply border-b-0; }
+
+.md-content th {
+  @apply font-semibold bg-primary/20 text-base-content whitespace-nowrap border-b-2 border-b-base-content/30;
+}
+
+/* Remove default paragraph margins inside cells (otherwise LLM multi-line
+   cells get extra spacing on the first line). */
+.md-content td p { @apply m-0; }
+.md-content td p + p { @apply mt-2; }
+
+/* Preserve line breaks within table cells. */
+.md-content td { white-space: pre-line; }
+
+.md-content tbody tr:nth-child(even) td {
+  @apply bg-base-content/5;
+}
+
+/* Horizontal rules */
+.md-content hr {
+  margin: 0.75em 0;
+  border: none;
+  border-top: 1px solid oklch(var(--b3) / 0.5);
+}
+
+/* Links */
+.md-content a {
+  color: oklch(var(--p) / 0.85);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.md-content a:hover {
+  color: oklch(var(--p));
+}
+
+/* Strong / bold */
+.md-content strong {
+  font-weight: 600;
+  color: oklch(var(--bc) / 0.9);
+}
+
+/* Images */
+.md-content img {
+  max-width: 100%;
+  border-radius: 8px;
+  margin: 0.3em 0;
+}
+
+/* Mermaid diagrams (rendered by utils/mermaid.ts; classes are set on the
+   host <div> by the renderer as it transitions between states). */
+.md-content .mermaid-pending,
+.md-content .mermaid-loading,
+.md-content .mermaid-rendered,
+.md-content .mermaid-error {
+  display: block;
+  margin: 0.75em 0;
+  padding: 0.75em;
+  border-radius: 10px;
+  overflow-x: auto;
+}
+
+.md-content .mermaid-pending,
+.md-content .mermaid-loading {
+  background: oklch(var(--b3) / 0.3);
+  border: 1px dashed oklch(var(--bc) / 0.2);
+  min-height: 3em;
+}
+
+.md-content .mermaid-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.md-content .mermaid-rendered {
+  background: oklch(var(--b1));
+  border: 1px solid oklch(var(--b3));
+}
+
+.md-content .mermaid-rendered svg {
+  /* Mermaid 输出的 SVG 带 inline max-width: <content-px>px（按内容算的）。
+     我们在 chat bubble 里强制占满容器宽度，避免扁平的 timeline / gantt
+     等图被压成一条难看懂的窄条；viewBox 比例由 height: auto 保留。 */
+  display: block;
+  margin: 0 auto;
+  width: 100%;
+  height: auto;
+  background: transparent !important;
+}
+
+.md-content .mermaid-error {
+  background: oklch(var(--er) / 0.08);
+  border: 1px solid oklch(var(--er) / 0.3);
+}

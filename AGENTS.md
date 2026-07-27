@@ -243,6 +243,7 @@ config ──┬──→ aha_provider ─────┐    （★ 唯一 aha �
 | `tower-http` 0.6 | M10 CORS / middleware | |
 | `tokio-stream` 0.1 + `async-stream` 0.3 | M10 SSE 流式响应 | |
 | `rust-embed` 8 | M10 嵌入式前端 | 打包 `web/dist/` 到二进制 |
+| `mermaid` ^11.12 | M10.1 前端图表渲染（前端依赖走 npm/bun，`web/package.json`） | 50+ diagram type Vite dynamic import 自动 code-split，未用不下载 |
 
 加新依赖前**先**在这里登记。
 

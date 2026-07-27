@@ -1,4 +1,7 @@
-import { createSignal } from 'solid-js'
+import { createEffect, createMemo, createSignal, onCleanup } from 'solid-js'
+import { marked } from 'marked'
+import { extractMermaidBlocks, restoreMermaidBlocks } from '../utils/markdown'
+import { applyHtml, renderMermaidBlocks } from '../utils/mermaid'
 
 interface MessageBubbleProps {
   role: 'user' | 'assistant'
@@ -6,9 +9,38 @@ interface MessageBubbleProps {
   time?: string
 }
 
+/// Convert markdown text to HTML. Complete ```mermaid … ``` blocks are
+/// extracted before parsing so `marked` doesn't tokenize their internals,
+/// then reinserted as `<div class="mermaid-pending">` placeholders for the
+/// mermaid renderer to pick up later.
+function renderMarkdownHtml(text: string): string {
+  if (!text) return ''
+  const { cleaned, blocks } = extractMermaidBlocks(text)
+  const html = marked.parse(cleaned, { breaks: true }) as string
+  return restoreMermaidBlocks(html, blocks)
+}
+
 export default function MessageBubble(props: MessageBubbleProps) {
   const isUser = props.role === 'user'
   const [copied, setCopied] = createSignal(false)
+  let contentRef!: HTMLDivElement
+
+  const html = createMemo(() => renderMarkdownHtml(props.content))
+
+  // Apply HTML imperatively (not via Solid's `innerHTML={}` binding) so we
+  // can preserve already-rendered mermaid SVGs across streaming re-renders.
+  // The shared `svgCache` in utils/mermaid.ts is keyed by source code, so
+  // identical blocks re-mount instantly without forcing a re-render.
+  createEffect(() => {
+    const h = html()
+    if (!contentRef) return
+    applyHtml(contentRef, h)
+    if (h) renderMermaidBlocks(contentRef)
+  })
+
+  onCleanup(() => {
+    if (contentRef) contentRef.innerHTML = ''
+  })
 
   const handleCopy = async () => {
     try {
@@ -28,7 +60,7 @@ export default function MessageBubble(props: MessageBubbleProps) {
       <div
         class={`w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 text-xs font-semibold ${
           isUser
-            ? 'bg-primary/20 text-primary rounded-full'
+            ? 'bg-primary/25 text-primary rounded-full'
             : 'bg-accent/15 text-accent'
         }`}
       >
@@ -45,14 +77,18 @@ export default function MessageBubble(props: MessageBubbleProps) {
 
       {/* Body */}
       <div class="flex-1 min-w-0">
+        {/* Bubble */}
         <div
-          class={`text-sm leading-relaxed whitespace-pre-wrap break-words ${
-            isUser
-              ? 'bg-base-200 px-3.5 py-2.5 rounded-2xl rounded-br-md'
-              : ''
-          }`}
+          class={`text-sm leading-relaxed break-words px-4 py-3 md-content
+            ${
+              isUser
+                ? 'bg-primary/15 text-base-content rounded-2xl rounded-br-sm'
+                : 'bg-base-200 text-base-content rounded-2xl rounded-bl-sm border border-base-300/60'
+            }`}
         >
-          {props.content || (
+          {props.content ? (
+            <div ref={contentRef!} />
+          ) : (
             <span class="flex items-center gap-1.5 py-1">
               <span class="w-1.5 h-1.5 bg-base-content/30 rounded-full animate-bounce" style="animation-delay: 0ms" />
               <span class="w-1.5 h-1.5 bg-base-content/30 rounded-full animate-bounce" style="animation-delay: 120ms" />

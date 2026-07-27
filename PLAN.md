@@ -473,6 +473,22 @@ rx
 
 **XLSX 多 sheet 行前缀**（M8 副作用）：多 sheet 时给每个 sheet 加 `--- Sheet: {name} ---` header + 每行加 `[SheetName]` 前缀。修复前跨 sheet 检索经常失败（sheet header 和数据行被 chunker 切到不同 chunk 时向量相似度断崖式下降），修复后 sheet header 跟数据行大概率落在同一 chunk，跨 sheet 检索可命中。**仍未保留表结构** / 公式 / 合并单元格。
 
+### 10.9 M10.1 前端 Mermaid 渲染
+
+**为什么预提取而不是 marked extension**：流式输出里```mermaid … ```块可能在任意时刻闭合，未闭合时不能动，闭合后要立即渲染。marked extension 反应在 parse 阶段，需手动管理 token 状态；预提取仅需一句正则，在“是否闭合”问题上表达力更强。额外收益：占位符替换后剩个独立 `M10MERMAIDTOKEN${counter}END` token，markdown/HTML 嵌套都不是个问题。
+
+**占位符字符集必须避开 markdown 特殊字符**（M10.1 实装后踩过的坑）：第一版占位符用的是 `{{__MERMAID_N__}}`——`__MERMAID_N__` 被 `marked` 当成 GFM strong emphasis 处理，渲染出 `<strong>MERMAID_N</strong>`，剩下 `{{` / `}}` 单独可见，restore 正则匹配不到完整 token，浏览器显示成 `{{MERMAID_0}}`（中间粗体被看到）。修复：占位符改为 `M10MERMAIDTOKEN${counter}END`，全字母数字，绝对不会被任何 markdown dialect 切碎。约束表（`markdown.ts` 注释里写死）：`_` `*` `` ` `` `[` `]` `(` `)` `#` `>` `<` `!` `|` `~` 都不能出现。
+
+**CSS：扁平图必须 `width: 100%` 而不是 `max-width: 100%`**：mermaid timeline / gantt 这类图 viewBox 比例扁（~7:1），`max-width: 100%` 让浏览器按比例缩到容器宽、高度被压成 ~108px，文字看不清。`width: 100%` 让 SVG 撑满容器宽度，viewBox 比例由 `height: auto` 保留 → 高宽同步放大，文字清晰。
+
+**为什么串行队列而不是 `Promise.all`**：`mermaid.render(id, code)` 内部会向 `document.body` 临时挂一个 `<svg>` / `<div>` 拿到 layout DOM 位置，并生成唯一 ID；并发调用一起插入会互踩。funnel 所有 render job 到一个 microtask 串行队列是最简单的保证。
+
+**为什么是 svgCache**：每次 token 来了 `content` 变 → `html()` memo 重算 → `applyHtml(contentRef, html)` 重新设 innerHTML → 之前已渲染好的 `<div class="mermaid-rendered">` 被擦掉变回 `.mermaid-pending` → 如果不缓存，每次都要重跑 `mermaid.render`，流式期间 mermaid 块会一直闪。使用 `Map<source, svg>` 按源码 key 缓存，重复源不重复渲染。
+
+**CSS 状态机**：`.mermaid-pending` (待 render) → `.mermaid-loading` (队列中) → `.mermaid-rendered` (成功) 或 `.mermaid-error` (失败降级原码+错误)。这三类在 `index.css` 里都有对应主题变量（`--b1` / `--er`），跟 daisyUI 明暗主题同步。
+
+**主题切换限制**：MVP 只在首次 `renderMermaidBlocks` 调用时初始化主题;用户后期点 theme toggle 不会重新渲染已有图表（重构成本不高，但不在 M10.1 scope）。后期如需可加 `MutationObserver` 监听 `html.dark` 变化 → 重新走过一遍 sweep。
+
 ### 10.8 M9 FTS5 短语搜索陷阱
 
 FTS5 的 `unicode61` tokenizer 对中文按单字切。**双引号包 query 做短语搜索会要求所有单字 token 精确连续出现**——自然语言查询中的补白词（"了什么"、"怎么做"）几乎不会同时出现在文档中，导致 0 匹配。
@@ -498,7 +514,16 @@ FTS5 的 `unicode61` tokenizer 对中文按单字切。**双引号包 query 做�
 - 默认关闭（HYBRID_ENABLED=false）：小数据集下向量检索已覆盖大部分文档，混合检索无额外收益。大文档量（100+ 文件）时开启。
 - --no-hybrid CLI flag 支持临时关闭。混合检索启用时跳过 rerank（RRF 直接输出 top_k）。
 
-**✅ M10：Web UI（已完成）**
+- ✅ M10：Web UI（已完成）
+
+**✅ M10.1：Mermaid 图表渲染（已完成，Web UI 增强）**
+- 实现：Web UI LLM 回复中的 ` ```mermaid … ``` ` 代码块自动渲染成 SVG。
+  架构：`web/src/utils/markdown.ts` 预提取 + 占位符反代（避坑 marked tokenize 内部语法）+ `web/src/utils/mermaid.ts` 串行渲染队列防并发 ID 冲突 + `svgCache` 跨流式复用 SVG，渲染失败降级显原码 + 错误。
+  - `marked.parse` 只处理除 mermaid 外的 markdown；mermaid 块提取后剩 `M10MERMAIDTOKEN${counter}END` token。
+  - `MessageBubble` 中 `html()` memo → `createEffect` 应用 + 调用 `renderMermaidBlocks`，避免 `innerHTML={…}` 重设置踩坏已渲染 SVG。
+- CSS：`.md-content .mermaid-*` 状态类与 daisyUI 主题变量同步；点 dark/light theme 时仅新块跟随（重构代价最高，但在 M10.1 scope 之外）。
+- 预估：~250 行 TSX（`markdown.ts` 60 / `mermaid.ts` 100 / MessageBubble 增 30 / CSS 30）。新增前端依赖：`mermaid@^11.12`，其 50+ diagram types 由 Vite dynamic import 自动 code-split，未用到的不下载。
+- **后续小修**（M10.1 收尾）：占位符字符集 bug + SVG 宽度 bug（详见 [CHANGELOG.md](CHANGELOG.md) §Unreleased / 本文档 §10.9）。
 - 实现：`lorag serve` 启动 axum HTTP server（localhost:3000），前端 SolidJS + Vite + daisyUI + Tailwind CSS。
   - `POST /api/chat` → SSE 流式多轮对话（复用 M8 `llm_complete_stream` 管线）
   - `POST /api/query` → 一次性 RAG 问答
