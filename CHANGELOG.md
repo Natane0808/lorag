@@ -26,6 +26,16 @@ lorag 的历史变更记录。**当前**架构 / 决策 / 限制见 [PLAN.md](PL
 - **关键经验**：① 流式通道：`spawn_blocking → blocking_lock → generate_stream → rt.block_on → poll async stream → tx.send`；② 纯向量检索对数字日期不敏感（相近日期的向量表示几乎重叠），混合检索（M9）才能解决；③ 防注入需多层——单靠 `sanitize_user_input` 不够，chunk 边界标记 + 系统 prompt 铁律 + recency bias 尾注形成纵深防御。
 - Commit: `3c33674 feat: M8 streaming output + prompt config + anti-injection + XLSX fix`
 
+### M9 — 混合检索（BM25 FTS5 + 向量 RRF）
+
+- **SQLite FTS5 全文索引**：`chunks` 表新增 `text` 列 + `chunks_fts` FTS5 虚拟表（`unicode61` tokenizer，BM25 排序）。安全迁移 `try_add_text_column` 兼容旧数据库。
+- **BM25 查询**：`search_fts(query, limit)` 通过 `build_fts5_query` 把用户自然语言问题转为 OR 查询（拉丁/数字保留完整词 + 中文按单字，OR 连接）。**避坑**：FTS5 短语搜索（双引号）要求所有单字 token 精确连续出现 → 自然语言查询补白词导致 0 匹配。
+- **RRF 融合**：`rrf_merge(vector_chunks, fts_chunks, top_k, k=60)` 两路分数融合去重 → 取 top_k。混合检索启用时跳过 rerank（RRF 直接输出 top_k）。
+- **配置**：`HYBRID_ENABLED`（默认 `false`，opt-in）。小数据集（几十 chunk）向量检索已够用，大文档量时互补。
+- **CLI**：`--no-hybrid` flag（`query` / `chat`），`/status` / banner 显示 Hybrid 状态。`cmd_query` 只在启用 hybrid 时打开 SqliteStore（避免无用开销）。
+- **关键经验**：① FTS5 `unicode61` 对中文按单字切，短语搜索 = 坑；② OR 语义 + BM25 排序自然过滤；③ 小数据集的 RRF 退化——两路返回几乎相同的 chunk → 无额外收益。
+- Commit: `1aa03a0 Add M9 hybrid retrieval (BM25 FTS5 + vector RRF)`
+
 ### M7.1 — Rerank（可选功能）
 
 - `cfg.rerank_model` 留空 → 永远不 load，不调 rerank（零开销，零内存）

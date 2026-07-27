@@ -1,4 +1,4 @@
-# lorag — 规划 (v0.1)
+﻿# lorag — 规划 (v0.1)
 
 > **状态**：M0–M8 全部实装。下一步：混合检索（M9）→ Web UI（M10）→ CI（M11）→ MCP（M12）。详见 §11。
 > 历史细节见 [CHANGELOG.md](CHANGELOG.md)。
@@ -188,6 +188,7 @@ lorag/
 | `PROMPT_RAG_INSTRUCTION` | query 模式下如何使用上下文 | 内置默认 |
 | `PROMPT_CHAT_CONTEXT_INSTRUCTION` | chat 多轮时指代上下文的指令 | 内置默认 |
 | `PROMPT_BARE_LLM` | 无 RAG 上下文 fallback 提示词 | 内置默认 |
+| `HYBRID_ENABLED` | 是否启用混合检索（BM25 FTS5 + 向量 RRF） | `false`（opt-in）|
 
 **EMBED_DIM 不再是配置项**——`AhaClient.embed_dim()` 在 load 模型后从 `config.json::hidden_size` 自动读出，lancedb schema 跟模型走。改 `EMBED_MODEL` 后**必须**清库重建（`lorag reindex`）。
 
@@ -236,8 +237,10 @@ RAG 主流程，**不**用 `AgentBuilder::dynamic_context`（62GB bug），手�
 
 ```rust
 pub async fn retrieve_chunks(
-    client: &AhaClient, cfg: &AppConfig, question: &str,
-    top_k: usize, enable_rerank: bool, rerank_top_n: usize,
+    client: &AhaClient, cfg: &AppConfig,
+    sqlite: Option<&SqliteStore>, question: &str,
+    top_k: usize, enable_hybrid: bool,
+    enable_rerank: bool, rerank_top_n: usize,
 ) -> Result<Vec<String>>;
 
 pub async fn llm_complete(
@@ -265,7 +268,13 @@ pub fn build_chat_preamble(cfg: &AppConfig, history: &[MessageRecord], chunks: &
 pub fn is_recoverable_error(err: &str) -> bool;
 ```
 
-**Rerank 路径**（`cfg.rerank_model` 非空 + `--no-rerank` 未传时启用）：
+**混合检索路径**（`HYBRID_ENABLED=true` 时，SQLite FTS5 + 向量 RRF 融合）：
+1. `vector_search` 取 `top_k * 3`（至少 10）条
+2. SQLite FTS5 BM25 搜索取同等条数
+3. RRF（Reciprocal Rank Fusion，k=60）两路分数合并 → 取 `top_k`
+4. 混合检索启用时**不走 rerank**（RRF 直接输出最终 top_k）
+
+**纯向量 + Rerank 路径**（混合检索关闭 + `cfg.rerank_model` 非空 + `--no-rerank` 未传时启用）：
 1. `vector_search` 取 `max(top_k, rerank_top_n)` 条
 2. 调 `client.rerank_score(question, &chunks)` 打分
 3. 按分数降序排，取前 `top_k` 条
@@ -292,7 +301,10 @@ pub fn is_recoverable_error(err: &str) -> bool;
 - `lancedb_store.rs`：建表 / 写数据 / `ensure_hnsw_index` / vector_search
 - `sqlite_store.rs`：
   - `sources` 表（`source_path` UNIQUE + `source_hash` 幂等）
-  - `chunks` 表（`(source_id, chunk_ordinal)` UNIQUE）
+  - `chunks` 表（`(source_id, chunk_ordinal)` UNIQUE，含 `text` 列供 FTS5 索引）
+  - `chunks_fts` FTS5 虚拟表（`unicode61` tokenizer，BM25 排序）
+  - `search_fts(query, limit)`：把用户问题转为 OR 查询（`build_fts5_query` 提取拉丁/数字 token + 中文单字，OR 连接），BM25 排名
+  - `rebuild_fts()`：清空 FTS5 后从 `chunks.text` 重新填充
   - `messages` 表（`session_id` + `ordinal`，多轮聊天用）
   - `append_message` / `load_recent_messages(session, limit)` / `clear_session` / `session_message_count`
 
@@ -327,6 +339,7 @@ lorag query <QUESTION>              # 一次性 RAG 问答
     --top-k <N>                     # 覆盖 cfg.top_k
     --no-rerank                     # 跳过 rerank（即使 .env 配了 RERANK_MODEL）
     --rerank-top-n <N>              # 覆盖 cfg.rerank_top_n
+    --no-hybrid                     # 关闭混合检索（即使 .env 配了 HYBRID_ENABLED=true）
 
 lorag chat                          # 多轮 REPL（带 SQLite 历史 + RAG；进程内连续，跨进程不续接）
     --message <TEXT>                # 一次性首问
@@ -334,6 +347,7 @@ lorag chat                          # 多轮 REPL（带 SQLite 历史 + RAG；�
     --no-banner                     # 安静启动
     --no-rag                        # 纯 LLM 对话
     --no-rerank / --rerank-top-n <N>
+    --no-hybrid
     --top-k <N>
 
 lorag doctor                        # 11 项环境检查（env / models / storage / features）
@@ -368,6 +382,7 @@ lorag doctor                        # 11 项环境检查（env / models / storag
 | `PROMPT_RAG_INSTRUCTION` | 内置默认 | query 模式下告诉 LLM 如何使用【上下文】 |
 | `PROMPT_CHAT_CONTEXT_INSTRUCTION` | 内置默认 | chat 多轮时指代【文档上下文】的指令 |
 | `PROMPT_BARE_LLM` | 内置默认 | 无 RAG 上下文 fallback 的简洁提示词 |
+| `HYBRID_ENABLED` | `false` | 启用混合检索（BM25 FTS5 + 向量 RRF 融合）。小数据集（< 几百 chunk）下向量检索已足够，大文档量时开启互补 |
 
 **换 embedding 模型**（维度变）：改 `EMBED_MODEL` → `lorag models pull` → `lorag reindex <path>`（自动清库重建）。只换 LLM 不动 embedding 时**不用**清库。
 
@@ -377,7 +392,7 @@ lorag doctor                        # 11 项环境检查（env / models / storag
 
 1. **单进程内存叠加**：4B LLM (~8GB FP16) + 0.6B Embedding (~1.5GB) + 可选 Rerank (~1.5GB) ≈ 10–12GB RAM。换小模型可降（0.6B LLM ~1.2GB + 0.6B Embedding ~1.5GB ≈ 3GB）。
 2. **CUDA 编译陷阱**：`cargo build`（无 flag）会盖掉 CUDA 二进制。改完代码后**必须**用 `cargo build --features cuda` 保住 GPU 加速（CPU 二进制仍能跑，但 4B 会从 1–3s 退化到 15–30s/query）。
-3. **纯向量检索**：关键词召回弱（实测部分关键词 / 数字日期类查询失败，纯向量对精确字面召回不敏感）。SQLite FTS5 BM25 混合检索计划在 M9 实装。
+3. **纯向量检索**：关键词召回相对弱。SQLite FTS5 BM25 混合检索已在 M9 实装（`HYBRID_ENABLED=true` 启用），但小数据集下效果不明显——向量检索已覆盖大部分文档。大文档量（100+ 文件、1000+ chunk）时 BM25 可互补召回精确关键词（人名、日期、编号）。目前默认关闭（opt-in）。
 4. **PDF 扫描版无效**：`pdf-extract` 只读文本层；扫描版得 OCR（aha 本身有 OCR 模型，未实装）。
 5. **xlsx 多 sheet 行前缀**：多 sheet 时每行加 `[SheetName]` 前缀（M8 修复），但仍不保留表结构 / 公式。
 6. **同步摄入**：超大文件（>100MB）可能 OOM；后续可改流式。
@@ -459,6 +474,14 @@ rx
 
 **XLSX 多 sheet 行前缀**（M8 副作用）：多 sheet 时给每个 sheet 加 `--- Sheet: {name} ---` header + 每行加 `[SheetName]` 前缀。修复前跨 sheet 检索经常失败（sheet header 和数据行被 chunker 切到不同 chunk 时向量相似度断崖式下降），修复后 sheet header 跟数据行大概率落在同一 chunk，跨 sheet 检索可命中。**仍未保留表结构** / 公式 / 合并单元格。
 
+### 10.8 M9 FTS5 短语搜索陷阱
+
+FTS5 的 `unicode61` tokenizer 对中文按单字切。**双引号包 query 做短语搜索会要求所有单字 token 精确连续出现**——自然语言查询中的补白词（"了什么"、"怎么做"）几乎不会同时出现在文档中，导致 0 匹配。
+
+**改走 OR 语义**：`build_fts5_query` 提取拉丁/数字 token（保留完整词）+ 中文单字，用 `OR` 连接。BM25 自动把匹配更多 token 的文档排前面。
+
+**默认关闭**：小数据集（几十 chunk）下向量检索已覆盖大部分文档，BM25 查询结果高度重合 → RRF 融合无额外收益，只有开销。默认 `HYBRID_ENABLED=false`（opt-in），大文档量时 `true` 开启。
+
 ---
 
 ## 11. 路线图（按优先级）
@@ -471,10 +494,10 @@ rx
 - 注意：不走 rig 抽象（`rig_compat.rs` `stream()` 未改动），直接调 aha `GenerateModel::generate_stream`。
 - 完成后 Web UI（M10）可直接消费 SSE 流。
 
-**M9：混合检索（BM25 + 向量 RRF）**
-- 痛点：纯向量检索对关键词不敏感（实测 `DFDB` 等缩写词召回失败）。
-- 方案：SQLite FTS5 全文索引（~100 行） + 向量检索结果做 RRF 融合。双路召回取 RRF 得分 top_k。
-- 预估：~200 行。**前置依赖**：无（FTS5 已在 rusqlite bundled feature 中）。
+**✅ M9：混合检索（已完成，opt-in）**
+- 实现：SQLite FTS5 BM25 关键词搜索 + 向量 vector_search → RRF 融合 → top_k。FTS5 用 OR 语义（build_fts5_query），避免短语搜索的补白词 0 匹配陷阱。
+- 默认关闭（HYBRID_ENABLED=false）：小数据集下向量检索已覆盖大部分文档，混合检索无额外收益。大文档量（100+ 文件）时开启。
+- --no-hybrid CLI flag 支持临时关闭。混合检索启用时跳过 rerank（RRF 直接输出 top_k）。
 
 **M10：Web UI**
 - 当前 `lorag chat` 是终端 REPL，RAG 答案含 Markdown/代码时体验差。浏览器天然适合渲染富文本。

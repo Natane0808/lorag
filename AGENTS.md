@@ -89,7 +89,7 @@ incremental = true
 ```
 config ──┬──→ aha_provider ─────┐    （★ 唯一 aha 入口 + 模型生命周期）
          ├──→ rig_compat ───────┤    （rig 0.40 provider trait 适配）
-         ├──→ rag ──────────────┤    （手写 embed + lancedb native + rerank；**绕过 dynamic_context**）
+         ├──→ rag ──────────────┤    （手写 embed + lancedb native + FTS5 hybrid + RRF + rerank；**绕过 dynamic_context**）
          ├──→ chunker ──────────┤
          ├──→ ingest ───────────┤    （6 种 loader + pipeline）
          ├──→ store ────────────┘    （lancedb + sqlite；store::lancedb_store 还管 HNSW 索引）
