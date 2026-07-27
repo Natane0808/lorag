@@ -86,6 +86,10 @@ enum Command {
         /// rerank 粗筛条数（覆盖 .env 的 `RERANK_TOP_N`）。**必须** > `top_k`。
         #[arg(long)]
         rerank_top_n: Option<usize>,
+
+        /// 关闭混合检索（即使 .env 配了 HYBRID_ENABLED=true）
+        #[arg(long)]
+        no_hybrid: bool,
     },
 
     /// 模型管理
@@ -136,6 +140,10 @@ enum Command {
         /// rerank 粗筛条数（覆盖 .env 的 `RERANK_TOP_N`）。**必须** > `top_k`。
         #[arg(long)]
         rerank_top_n: Option<usize>,
+
+        /// 关闭混合检索（即使 .env 配了 HYBRID_ENABLED=true）
+        #[arg(long)]
+        no_hybrid: bool,
     },
 
     /// 诊断环境：检查 .env / 模型文件 / 存储路径 / 编译 feature
@@ -245,7 +253,8 @@ fn run(cli: Cli) -> Result<()> {
                 top_k,
                 no_rerank,
                 rerank_top_n,
-            } => cmd_query(&cfg, question, top_k, no_rerank, rerank_top_n).await,
+                no_hybrid,
+            } => cmd_query(&cfg, question, top_k, no_rerank, rerank_top_n, no_hybrid).await,
             Command::Models { action } => match action {
                 ModelsAction::Pull => cmd_models_pull(&cfg).await,
                 ModelsAction::Status { r#init } => cmd_models_status(&cfg, r#init).await,
@@ -262,6 +271,7 @@ fn run(cli: Cli) -> Result<()> {
                 no_rerank,
                 top_k,
                 rerank_top_n,
+                no_hybrid,
             } => {
                 cmd_chat(
                     &cfg,
@@ -272,6 +282,7 @@ fn run(cli: Cli) -> Result<()> {
                     no_rerank,
                     top_k,
                     rerank_top_n,
+                    no_hybrid,
                 )
                 .await
             }
@@ -325,9 +336,11 @@ async fn cmd_query(
     top_k: Option<usize>,
     no_rerank: bool,
     rerank_top_n: Option<usize>,
+    no_hybrid: bool,
 ) -> Result<()> {
     use lorag::aha_provider::AhaClient;
     use lorag::rag;
+    use lorag::store::sqlite_store::SqliteStore;
 
     let k = top_k.unwrap_or(cfg.top_k);
     let rn = rerank_top_n.unwrap_or(cfg.rerank_top_n);
@@ -353,10 +366,34 @@ async fn cmd_query(
         );
     }
 
+    let enable_hybrid = cfg.hybrid_enabled && !no_hybrid;
+    let sqlite =
+        if enable_hybrid {
+            Some(SqliteStore::open(&cfg.sqlite_path).with_context(|| {
+                format!("failed to open sqlite at {}", cfg.sqlite_path.display())
+            })?)
+        } else {
+            None
+        };
+
     println!("searching top-{k} chunks for: {question:?}");
+    if enable_hybrid {
+        println!("  hybrid search: BM25 (FTS5) + vector (cosine) → RRF merge");
+    }
 
     // 1. 检索 chunks + 构建 preamble（复制 rag_query 逻辑，但不调 LLM）
-    let preamble = match rag::retrieve_chunks(&client, cfg, &question, k, enable_rerank, rn).await {
+    let preamble = match rag::retrieve_chunks(
+        &client,
+        cfg,
+        sqlite.as_ref(),
+        &question,
+        k,
+        enable_hybrid,
+        enable_rerank,
+        rn,
+    )
+    .await
+    {
         Ok(chunks) => {
             let context = rag::format_chunks_for_context(&chunks);
             rag::build_rag_preamble(cfg, &context)
@@ -520,6 +557,7 @@ async fn cmd_chat(
     no_rerank: bool,
     top_k: Option<usize>,
     rerank_top_n: Option<usize>,
+    no_hybrid: bool,
 ) -> Result<()> {
     use lorag::aha_provider::AhaClient;
     use lorag::store::sqlite_store::SqliteStore;
@@ -536,8 +574,10 @@ async fn cmd_chat(
     let sqlite = SqliteStore::open(&cfg.sqlite_path)
         .with_context(|| format!("failed to open sqlite at {}", cfg.sqlite_path.display()))?;
 
+    let enable_hybrid = cfg.hybrid_enabled && !no_hybrid;
+
     if !no_banner {
-        print_chat_banner(cfg, k, rn, no_history, no_rag, enable_rerank);
+        print_chat_banner(cfg, k, rn, no_history, no_rag, enable_rerank, enable_hybrid);
     }
 
     println!("loading models (10s~minutes first time, seconds after)...");
@@ -564,6 +604,7 @@ async fn cmd_chat(
             no_history,
             no_rag,
             enable_rerank,
+            enable_hybrid,
         )
         .await
         {
@@ -620,6 +661,7 @@ async fn cmd_chat(
                         no_history,
                         no_rag,
                         enable_rerank,
+                        enable_hybrid,
                     );
                 }
                 "clear" | "cls" => {
@@ -646,6 +688,7 @@ async fn cmd_chat(
             no_history,
             no_rag,
             enable_rerank,
+            enable_hybrid,
         )
         .await
         {
@@ -669,6 +712,7 @@ async fn run_chat_turn(
     no_history: bool,
     no_rag: bool,
     enable_rerank: bool,
+    enable_hybrid: bool,
 ) -> Result<String> {
     use lorag::rag;
 
@@ -689,7 +733,17 @@ async fn run_chat_turn(
     let chunks = if no_rag {
         Vec::new()
     } else {
-        match rag::retrieve_chunks(client, cfg, user_msg, top_k, enable_rerank, rerank_top_n).await
+        match rag::retrieve_chunks(
+            client,
+            cfg,
+            Some(sqlite),
+            user_msg,
+            top_k,
+            enable_hybrid,
+            enable_rerank,
+            rerank_top_n,
+        )
+        .await
         {
             Ok(c) => c,
             Err(e) => {
@@ -748,6 +802,7 @@ fn print_chat_banner(
     no_history: bool,
     no_rag: bool,
     enable_rerank: bool,
+    enable_hybrid: bool,
 ) {
     println!(
         "lorag chat v{} (multi-turn REPL)",
@@ -768,6 +823,9 @@ fn print_chat_banner(
     } else {
         println!("  RAG:        enabled (top_k={top_k})");
     }
+    if enable_hybrid && !no_rag {
+        println!("  Hybrid:     BM25 (FTS5) + vector (cosine) → RRF merge");
+    }
     if cfg.rerank_model.is_empty() {
         println!("  Rerank:     not configured (set RERANK_MODEL= in .env to enable)");
     } else if enable_rerank {
@@ -784,7 +842,7 @@ fn print_chat_banner(
 fn print_chat_help(no_rag: bool) {
     println!("commands:");
     println!("  /help, /h, /?    show this help");
-    println!("  /status          show current model + RAG + rerank config");
+    println!("  /status          show current model + RAG + hybrid + rerank config");
     println!("  /clear, /cls     clear the screen (50 newlines)");
     println!("  /exit, /quit, /q exit the chat");
     println!();
@@ -793,7 +851,7 @@ fn print_chat_help(no_rag: bool) {
         println!("pipeline: question → LLM (RAG disabled)");
     } else {
         println!(
-            "pipeline: question → embed → top-K LanceDB search → history + context + question → LLM → answer"
+            "pipeline: question → embed + BM25 FTS5 → RRF merge → history + context + question → LLM → answer"
         );
     }
 }
@@ -808,6 +866,7 @@ fn print_chat_status(
     no_history: bool,
     no_rag: bool,
     enable_rerank: bool,
+    enable_hybrid: bool,
 ) {
     println!("status:");
     if no_history {
@@ -825,6 +884,11 @@ fn print_chat_status(
         println!("  RAG:        disabled (--no-rag)");
     } else {
         println!("  Top-K:      {top_k}");
+    }
+    if enable_hybrid && !no_rag {
+        println!("  Hybrid:     enabled (BM25 FTS5 + vector RRF merge)");
+    } else if !no_rag {
+        println!("  Hybrid:     disabled (--no-hybrid or HYBRID_ENABLED=false)");
     }
     if cfg.rerank_model.is_empty() {
         println!("  Rerank:     not configured");

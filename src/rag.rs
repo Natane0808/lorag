@@ -1,5 +1,6 @@
 //! RAG 查询：手写 embed → lancedb vector_search → 拼 context → LLM。
 //!
+//! M9 起支持混合检索：vector_search + SQLite FTS5 BM25 → RRF 融合。
 //! 不用 rig-lancedb 的 `LanceDbVectorIndex` + `AgentBuilder::dynamic_context`
 //! （rig 0.40 + lancedb 0.30 集成内部某步会一次性分配 ~62GB 内存）。
 //! 直接调 lancedb 原生 API + rig `completion_model.completion()`。
@@ -8,6 +9,7 @@
 //!
 //! LanceDB 没数据时自动 fallback 到裸 LLM：不检索 context，直接问模型。
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -24,6 +26,7 @@ use rig::one_or_many::OneOrMany;
 use crate::aha_provider::AhaClient;
 use crate::config::AppConfig;
 use crate::models::MessageRecord;
+use crate::store::sqlite_store::SqliteStore;
 
 /// **M7 chat**：多轮对话时把【历史对话】 + 【文档上下文】拼成 LLM preamble。
 ///
@@ -163,21 +166,25 @@ pub async fn llm_complete_stream(
     client.llm_generate_stream(params).await
 }
 
-/// **低层**：embed question + lancedb vector_search top_k + 收集 chunks 文本。
+/// **低层**：embed question + lancedb vector_search +（可选）FTS5 BM25 → RRF 融合 → top_k chunks。
 ///
 /// 不调 LLM；不拼 context。RAG 失败时返回 `Err`，调用方决定要不要 fallback 到裸 LLM。
 ///
-/// **rerank 路径**：当 `enable_rerank=true` 且 `client.has_rerank()` 为 true：
-/// 1. vector_search 取 `rerank_top_n` 条候选（**比 `top_k` 大**才有排序空间；调用方保证 `rerank_top_n > top_k`）
-/// 2. 调 `client.rerank_score(question, chunks)` 打分
-/// 3. 按分数降序排，取前 `top_k` 条
+/// **混合检索**（当 `sqlite.is_some() && enable_hybrid`）：
+/// 1. 向量搜索取 `top_k * 3` 条
+/// 2. FTS5 BM25 搜索取 `top_k * 3` 条
+/// 3. RRF 融合 → top_k
 ///
-/// `enable_rerank=false` 或 `!client.has_rerank()`：直接 vector_search `top_k` 条，零开销。
+/// **纯向量路径**（`sqlite.is_none() || !enable_hybrid`）：
+/// 直接 vector_search + 可选 rerank，行为同 M8。
+#[allow(clippy::too_many_arguments)]
 pub async fn retrieve_chunks(
     client: &AhaClient,
     cfg: &AppConfig,
+    sqlite: Option<&SqliteStore>,
     question: &str,
     top_k: usize,
+    enable_hybrid: bool,
     enable_rerank: bool,
     rerank_top_n: usize,
 ) -> Result<Vec<String>> {
@@ -220,10 +227,14 @@ pub async fn retrieve_chunks(
             "failed to open `documents` table in lancedb (run `lorag ingest <path>` first)",
         )?;
 
-    // ── 3. vector_search limit = max(top_k, rerank_top_n) ──
-    //   rerank 时拿更多候选（top_N），让 rerank 有排序空间；不 rerank 时只取 top_k，省 IO
+    // ── 3. vector_search limit ──
+    //   混合检索时取更多候选（top_k × 3）给 RRF 融合留空间
+    //   rerank-only 时按 rerank_top_n 取；纯向量时按 top_k 取
+    let should_hybrid = enable_hybrid && sqlite.is_some();
     let should_rerank = enable_rerank && client.has_rerank();
-    let fetch_limit = if should_rerank {
+    let fetch_limit = if should_hybrid {
+        top_k.saturating_mul(3).max(10)
+    } else if should_rerank {
         top_k.max(rerank_top_n)
     } else {
         top_k
@@ -267,7 +278,24 @@ pub async fn retrieve_chunks(
         );
     }
 
-    // ── 5. rerank 路径（如果启用）──
+    // ── 5. 混合检索（如果启用）──
+    if should_hybrid {
+        let sqlite = sqlite.unwrap(); // 上面 should_hybrid 已经保证 Some
+        match sqlite.search_fts(question, fetch_limit) {
+            Ok(fts_chunks) if !fts_chunks.is_empty() => {
+                chunks = rrf_merge(&chunks, &fts_chunks, top_k, 60);
+            }
+            Ok(_) => {
+                // FTS5 返回空 → 纯向量结果即可
+            }
+            Err(e) => {
+                tracing::warn!("FTS5 search failed, falling back to vector-only: {e:#}");
+            }
+        }
+        return Ok(chunks); // 混合检索结果直接返回（不再走 rerank）
+    }
+
+    // ── 6. rerank 路径（纯向量模式 + 启用 rerank）──
     if should_rerank {
         // 已经 ensure 过：has_rerank() 返回 true 说明 slot 填了；不会二次 ensure
         // 防御性：万一 slot 仍空，ensure 一次
@@ -311,15 +339,29 @@ pub async fn retrieve_chunks(
 ///
 /// `rerank_top_n`：rerank 启用时用作粗筛上限（必须 > `top_k`）。调用方传
 /// `cfg.rerank_top_n`（用户可通过 `RERANK_TOP_N` 环境变量 / `--rerank-top-n` CLI flag 覆盖）。
+#[allow(clippy::too_many_arguments)]
 pub async fn rag_query(
     client: &AhaClient,
     cfg: &AppConfig,
+    sqlite: Option<&SqliteStore>,
     question: &str,
     top_k: usize,
+    enable_hybrid: bool,
     enable_rerank: bool,
     rerank_top_n: usize,
 ) -> Result<String> {
-    match try_rag_with_lancedb(client, cfg, question, top_k, enable_rerank, rerank_top_n).await {
+    match try_rag_with_lancedb(
+        client,
+        cfg,
+        sqlite,
+        question,
+        top_k,
+        enable_hybrid,
+        enable_rerank,
+        rerank_top_n,
+    )
+    .await
+    {
         Ok(answer) => Ok(answer),
         Err(e) => {
             let err_str = format!("{e:#}");
@@ -404,16 +446,56 @@ pub fn format_chunks_for_context(chunks: &[String]) -> String {
     s
 }
 
+/// M9 RRF (Reciprocal Rank Fusion)：合并两路检索结果。
+///
+/// `k` 为平滑常数（通用值 60）。文本做 key 去重；
+/// 文本同时出现在两路 → 分数相加；只在一路 → 只加该路分数。
+fn rrf_merge(
+    vector_chunks: &[String],
+    fts_chunks: &[String],
+    top_k: usize,
+    k_rrf: usize,
+) -> Vec<String> {
+    let mut scores: HashMap<&str, f64> =
+        HashMap::with_capacity(vector_chunks.len() + fts_chunks.len());
+    for (rank, text) in vector_chunks.iter().enumerate() {
+        *scores.entry(text.as_str()).or_default() += 1.0 / (k_rrf as f64 + rank as f64 + 1.0);
+    }
+    for (rank, text) in fts_chunks.iter().enumerate() {
+        *scores.entry(text.as_str()).or_default() += 1.0 / (k_rrf as f64 + rank as f64 + 1.0);
+    }
+    let mut scored: Vec<(&str, f64)> = scores.into_iter().collect();
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored
+        .into_iter()
+        .take(top_k)
+        .map(|(text, _)| text.to_string())
+        .collect()
+}
+
 /// 完整 RAG 流程（不带 fallback）。内部走 `retrieve_chunks` + `llm_complete`。
+#[allow(clippy::too_many_arguments)]
 async fn try_rag_with_lancedb(
     client: &AhaClient,
     cfg: &AppConfig,
+    sqlite: Option<&SqliteStore>,
     question: &str,
     top_k: usize,
+    enable_hybrid: bool,
     enable_rerank: bool,
     rerank_top_n: usize,
 ) -> Result<String> {
-    let chunks = retrieve_chunks(client, cfg, question, top_k, enable_rerank, rerank_top_n).await?;
+    let chunks = retrieve_chunks(
+        client,
+        cfg,
+        sqlite,
+        question,
+        top_k,
+        enable_hybrid,
+        enable_rerank,
+        rerank_top_n,
+    )
+    .await?;
     let context = format_chunks_for_context(&chunks);
     let preamble = build_rag_preamble(cfg, &context);
     llm_complete(client, cfg, preamble, question).await

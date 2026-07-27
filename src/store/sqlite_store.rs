@@ -52,10 +52,14 @@ impl SqliteStore {
                     source_id     INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
                     chunk_ordinal INTEGER NOT NULL,
                     char_count    INTEGER NOT NULL,
+                    text          TEXT NOT NULL DEFAULT '',
                     UNIQUE(source_id, chunk_ordinal)
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source_id);
+
+                -- M9 hybrid retrieval: BM25 FTS5 full-text index
+                CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(text);
 
                 -- M7 chat: 每条消息属于一个 session，ordinal session 内从 0 严格递增
                 CREATE TABLE IF NOT EXISTS messages (
@@ -70,7 +74,29 @@ impl SqliteStore {
 
                 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, ordinal);",
             )
-            .context("failed to create sqlite tables")
+            .context("failed to create sqlite tables")?;
+
+        // 迁移：旧 chunks 表可能没有 text 列（M9 前创建）
+        self.try_add_text_column()?;
+
+        Ok(())
+    }
+
+    /// 安全迁移：给已有 `chunks` 表加 `text` 列（不存在则跳过）。
+    fn try_add_text_column(&self) -> Result<()> {
+        let has_text: bool = self.conn.prepare("SELECT text FROM chunks LIMIT 0").is_ok();
+        if has_text {
+            return Ok(());
+        }
+        // 列不存在 → 加列 + 给旧行填空文本
+        self.conn
+            .execute_batch(
+                "ALTER TABLE chunks ADD COLUMN text TEXT NOT NULL DEFAULT '';
+                 INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild');",
+            )
+            .context("failed to add text column to chunks table (M9 migration: run `lorag reindex` if this persists)")?;
+        tracing::info!("migrated sqlite: added text column to chunks + rebuilt FTS5 index");
+        Ok(())
     }
 
     /// 按 `source_path` 查找已摄入记录（如果存在）。
@@ -137,23 +163,79 @@ impl SqliteStore {
     }
 
     /// 批量插入 chunk 记录（关联到给定 `source_id`）。
+    ///
+    /// M9 起同时写入 `chunks.text` 和 `chunks_fts` 全文索引。
     pub fn insert_chunks(&self, source_id: i64, chunks: &[Chunk]) -> Result<()> {
-        let mut stmt = self
+        let mut insert_chunk = self
             .conn
             .prepare(
-                "INSERT INTO chunks (source_id, chunk_ordinal, char_count) VALUES (?1, ?2, ?3)",
+                "INSERT INTO chunks (source_id, chunk_ordinal, char_count, text) VALUES (?1, ?2, ?3, ?4)",
             )
             .context("failed to prepare insert_chunks statement")?;
 
+        let mut insert_fts = self
+            .conn
+            .prepare("INSERT INTO chunks_fts(text) VALUES (?1)")
+            .context("failed to prepare FTS5 insert")?;
+
         for chunk in chunks {
-            stmt.execute(params![
-                source_id,
-                chunk.ordinal as i64,
-                chunk.text.chars().count() as i64,
-            ])
-            .context("failed to insert chunk record")?;
+            insert_chunk
+                .execute(params![
+                    source_id,
+                    chunk.ordinal as i64,
+                    chunk.text.chars().count() as i64,
+                    chunk.text.as_str(),
+                ])
+                .context("failed to insert chunk record")?;
+
+            insert_fts
+                .execute(params![chunk.text.as_str()])
+                .context("failed to insert FTS5 entry")?;
         }
 
+        Ok(())
+    }
+
+    /// M9 混合检索：BM25 FTS5 全文搜索。
+    ///
+    /// 搜索用户问题中的关键词，返回匹配文档文本（按 BM25 rank 降序）。
+    /// `limit` 控制返回数量上限。
+    pub fn search_fts(&self, query: &str, limit: usize) -> Result<Vec<String>> {
+        if query.trim().is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        // FTS5 + unicode61 tokenizer：中文按单字切，英文按词切。
+        // 用 OR 连接 token（不用短语/AND）——自然语言查询含补白词（"什么"、"了"），
+        // 短语搜索要求所有 token 精确连续出现 → 几乎 0 匹配；AND 同样因补白词失败。
+        // OR + BM25 排序：匹配更多关键词的文档自然排在前面。
+        let fts_query = build_fts5_query(query);
+        let sql = format!(
+            "SELECT text FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY rank LIMIT {limit}"
+        );
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
+            .with_context(|| format!("failed to prepare FTS5 search: {query}"))?;
+
+        let texts: Vec<String> = stmt
+            .query_map(params![fts_query], |row| row.get(0))
+            .context("FTS5 search failed")?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(texts)
+    }
+
+    /// M9: 重建 FTS5 索引（在 force 重摄入后调用，清理过时条目）。
+    ///
+    /// 清空 `chunks_fts` 后从 `chunks.text` 重新填入。
+    pub fn rebuild_fts(&self) -> Result<()> {
+        self.conn
+            .execute_batch(
+                "DELETE FROM chunks_fts;
+                 INSERT INTO chunks_fts(text) SELECT text FROM chunks;",
+            )
+            .context("failed to rebuild FTS5 index")?;
         Ok(())
     }
 
@@ -285,6 +367,47 @@ impl SqliteStore {
             )
             .context("failed to count session messages")
     }
+}
+
+/// 将用户自然语言问题转为 FTS5 兼容的 OR 查询。
+///
+/// `unicode61` tokenizer 对中文按单字切，对英文按词切。
+/// 短语搜索（双引号）和隐式 AND 都太严格——用户问题含"了什么"等补白词时
+/// 几乎无匹配。
+///
+/// 策略：提取拉丁/数字 token（保留完整词）+ 中文单字，用 `OR` 连接。
+/// BM25 自动把匹配更多关键词的文档排前面。
+fn build_fts5_query(query: &str) -> String {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut latin_buf = String::new();
+
+    for ch in query.chars() {
+        // 拉丁字母 / 数字：缓冲到当前词
+        if ch.is_alphanumeric() && !('\u{4e00}'..='\u{9fff}').contains(&ch) {
+            latin_buf.push(ch);
+        } else {
+            // 遇到非拉丁字符 → flush 拉丁缓冲
+            if !latin_buf.is_empty() {
+                tokens.push(std::mem::take(&mut latin_buf));
+            }
+            // CJK 字符 → 独立 token
+            if ('\u{4e00}'..='\u{9fff}').contains(&ch) {
+                tokens.push(ch.to_string());
+            }
+            // 其他字符（标点、空格）跳过
+        }
+    }
+    // flush 最后的拉丁缓冲
+    if !latin_buf.is_empty() {
+        tokens.push(latin_buf);
+    }
+
+    if tokens.is_empty() {
+        // 边缘情况：无效输入 → 兜底
+        return query.to_string();
+    }
+
+    tokens.join(" OR ")
 }
 
 #[cfg(test)]
@@ -503,5 +626,35 @@ mod tests {
         assert_eq!(s2.len(), 2);
         assert_eq!(s2[0].content, "x");
         assert_eq!(s2[1].content, "y");
+    }
+
+    // M9: FTS5 查询构造
+    #[test]
+    fn test_build_fts5_query_mixed_cjk_latin() {
+        // CJK + 拉丁数字混合 → 拉丁保留完整 token，CJK 单字
+        let q = build_fts5_query("20210826常朕做了什么？");
+        assert!(q.contains("20210826"), "expected 20210826 in: {q}");
+        assert!(q.contains("常"), "expected 常 in: {q}");
+        assert!(q.contains("朕"), "expected 朕 in: {q}");
+        // 应使用 OR 连接
+        assert!(q.contains(" OR "), "expected OR in: {q}");
+        // 问号应被过滤
+        assert!(!q.contains('？'), "expected no ？ in: {q}");
+        assert!(!q.contains('?'), "expected no ? in: {q}");
+    }
+
+    #[test]
+    fn test_build_fts5_query_pure_english() {
+        let q = build_fts5_query("Rust blockchain development");
+        assert!(q.contains("Rust"), "expected Rust in: {q}");
+        assert!(q.contains("blockchain"), "expected blockchain in: {q}");
+        assert!(q.contains("development"), "expected development in: {q}");
+        assert!(q.contains(" OR "), "expected OR in: {q}");
+    }
+
+    #[test]
+    fn test_build_fts5_query_empty() {
+        let q = build_fts5_query("");
+        assert!(q.is_empty());
     }
 }

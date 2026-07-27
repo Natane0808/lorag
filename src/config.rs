@@ -77,6 +77,7 @@ struct RawConfig {
     prompt_rag_instruction: String,
     prompt_chat_context_instruction: String,
     prompt_bare_llm: String,
+    hybrid_enabled: Option<bool>,
 }
 
 impl RawConfig {
@@ -121,6 +122,11 @@ impl RawConfig {
             prompt_chat_context_instruction: std::env::var("PROMPT_CHAT_CONTEXT_INSTRUCTION")
                 .unwrap_or_default(),
             prompt_bare_llm: std::env::var("PROMPT_BARE_LLM").unwrap_or_default(),
+            hybrid_enabled: std::env::var("HYBRID_ENABLED")
+                .ok()
+                .map(|s| s.parse::<bool>())
+                .transpose()
+                .context("HYBRID_ENABLED must be true or false")?,
         })
     }
 }
@@ -176,6 +182,7 @@ impl From<RawConfig> for AppConfig {
             } else {
                 r.prompt_bare_llm
             },
+            hybrid_enabled: r.hybrid_enabled.unwrap_or(false),
         }
     }
 }
@@ -228,6 +235,10 @@ pub struct AppConfig {
     /// 裸 LLM 模式（无 RAG 上下文 fallback）的提示词。
     /// 默认: `"你是一个简洁的助手，用一两句话直接回答问题。"`
     pub prompt_bare_llm: String,
+    /// 是否启用混合检索（BM25 FTS5 + 向量 RRF 融合）。默认 false（opt-in）。
+    /// 小数据集（< 几百 chunk）下向量检索已足够；数据集大时开启互补。
+    /// CLI 可用 `--no-hybrid` 临时关闭。
+    pub hybrid_enabled: bool,
 }
 
 impl AppConfig {
