@@ -24,6 +24,7 @@
 - **M8 4 层防注入**：① sanitize ② chunk 边界包裹 ③ 系统 prompt 5 条铁律 ④ recency bias 尾注
 - **M9 混合检索（opt-in）**：SQLite FTS5 BM25 + 向量 RRF 融合，大文档量时开启
 - **M10 Web UI**：`lorag serve` 启动 axum + SolidJS + daisyUI，浏览器聊天界面，SSE 流式渲染，支持 Mermaid 图表（流式 chunk、失败降级、原码回退）
+- **M11 系统托盘模式**：`lorag tray` 启动 Web UI + 系统托盘常驻，浏览器自动打开，右键托盘可退出——零命令行体验
 - **M8 Prompt 可配置**：4 个 `PROMPT_*` 字段覆盖默认（默认含 5 条防注入铁律）
 - **可观测**：每步 ingestion 打印进度；query 跑出 RAG 命中 / fallback
 - **GPU 加速可选**：默认 CPU 跑；NVIDIA GPU 加 `--features cuda`
@@ -148,6 +149,8 @@ lorag chat                          # 多轮对话 REPL（带 SQLite 历史 + RA
     --top-k <N>
 
 lorag serve [--port <N>]                # 启动 Web UI（axum + SolidJS，localhost:3000）
+
+lorag tray [--port <N>]                 # 启动 Web UI + 系统托盘图标（M11 桌面集成）
 
 lorag doctor                        # 11 项环境检查（env / models / storage / features）
 ```

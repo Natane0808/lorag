@@ -12,3 +12,4 @@ pub mod rag;
 pub mod rig_compat;
 pub mod server;
 pub mod store;
+pub mod tray;

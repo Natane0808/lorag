@@ -114,7 +114,24 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 ///
 /// Serves the embedded frontend (from `rust-embed`) at `/*`;
 /// no external web/dist/ directory needed at runtime.
+///
+/// 行为完全等价于 M10 原版：内部委托给 [`start_with_shutdown`]，传入一个永不触发的
+/// shutdown future（`futures::future::pending()`），保持 100% 向后兼容。
 pub async fn start(state: Arc<AppState>, port: u16) -> Result<()> {
+    start_with_shutdown(state, port, futures::future::pending()).await
+}
+
+/// Start the axum server on the given port with graceful shutdown support (M11).
+///
+/// 跟 [`start`] 完全一致，但接受一个 `shutdown` future——一旦它 resolve，axum 会
+/// 停止接受新连接并等现有连接处理完后退出（graceful shutdown）。
+///
+/// `lorag tray` 用这个把托盘的"Quit"菜单信号（`oneshot::Receiver<()>`）接进来，
+/// 让用户右键托盘 → Quit → 进程能干净退出。
+pub async fn start_with_shutdown<F>(state: Arc<AppState>, port: u16, shutdown: F) -> Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
     use tower_http::cors::CorsLayer;
 
     let api_router = build_router(state);
@@ -132,6 +149,7 @@ pub async fn start(state: Arc<AppState>, port: u16) -> Result<()> {
         .context(format!("failed to bind to port {port}"))?;
 
     axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
         .await
         .context("axum server error")
 }

@@ -79,6 +79,18 @@ tokio-stream = "0.1"
 async-stream = "0.3"
 rust-embed = "8"
 
+# ===== M11: 系统托盘（lorag tray）=====
+# tray-icon：纯 Rust 跨平台托盘（Windows/macOS/Linux，无 GTK 依赖）
+# image：解码 assets/icon.png → RGBA bytes 喂给 tray-icon；只要 png feature
+tray-icon = "0.19"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# Windows-only：tray-icon 在创建线程注册 hidden window 接收 menu 事件，
+# 必须显式 pump Win32 message queue（PeekMessage/DispatchMessage），否则菜单点击不触发。
+# windows-sys 是 tray-icon 的传递依赖，加为直接 dep 几乎零额外编译成本。
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }
+
 # ===== Feature flags（passthrough 到 aha）=====
 # 默认 CPU 推理（candle 默认 backend）。要 GPU 加速时选对应 feature。
 #

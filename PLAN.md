@@ -151,6 +151,7 @@ lorag/
 │   ├── chunker.rs              # 段落 + 字符滑窗切块
 │   ├── models.rs               # SourceRecord / Chunk / MessageRecord
 │   ├── doctor.rs               # 11 项环境检查
+│   ├── tray.rs                 # 系统托盘核心（M11）
 │   ├── ingest/
 │   │   ├── loader.rs           # 按扩展名分派
 │   │   ├── pdf.rs / docx.rs / pptx.rs / xlsx.rs / md.rs / txt.rs
@@ -314,6 +315,16 @@ pub fn is_recoverable_error(err: &str) -> bool;
 
 按 `\n\n` 切段（段落级），每段超 `CHUNK_SIZE` 字符按 `CHUNK_SIZE` 滑窗切，重叠 `CHUNK_OVERLAP` 字符。输出 `Vec<Chunk>`。
 
+### 6.8 `tray.rs`
+
+M11 系统托盘核心（`lorag tray`）：axum server + 托盘图标常驻，浏览器自动打开。
+
+- `run_tray_loop(port, shutdown_tx)`：构建托盘图标（`include_bytes!("../assets/icon.png")` → `image` 解码 RGBA）+ 菜单（`Open Web UI` / `Quit`），阻塞 main thread 跑 `tray_icon` 事件循环；`Quit` → oneshot 通知 axum `with_graceful_shutdown`（5 秒超时强退）。
+- `open_browser(url)`：跨平台 `std::process::Command`（Windows `cmd /C start "" url` / macOS `open` / Linux `xdg-open`），**不**引入 webbrowser crate。
+- `menu_id_to_command(id)`：菜单 id → `TrayCommand` 纯函数（单元测试覆盖）。
+- **Windows message pump**：tray-icon 0.19 在 Windows 要求创建线程显式 pump Win32 message queue（故 `windows-sys` 是直接依赖），否则菜单点击事件永不触发。
+- **平台状态**：Windows 已验证；macOS 需 `tray_icon::platform::macos::init_ns_app()`（后续）；Linux 未验证。
+
 ---
 
 ## 7. CLI 命令
@@ -349,6 +360,8 @@ lorag chat                          # 多轮 REPL（带 SQLite 历史 + RAG；�
     --no-rerank / --rerank-top-n <N>
     --no-hybrid
     --top-k <N>
+
+lorag tray [--port <N>]             # 启动 Web UI + 系统托盘图标（M11）
 
 lorag doctor                        # 11 项环境检查（env / models / storage / features）
 ```
@@ -501,7 +514,7 @@ FTS5 的 `unicode61` tokenizer 对中文按单字切。**双引号包 query 做�
 
 ## 11. 路线图（按优先级）
 
-### 🔥 近期（M8–M10）
+### 🔥 近期（M8–M11）
 
 **✅ M8：流式输出（已完成）**
 - 实现：`llm_complete_stream` 通过 `mpsc::channel(64)` + `spawn_blocking` 桥接 aha `generate_stream`。
@@ -536,6 +549,12 @@ FTS5 的 `unicode61` tokenizer 对中文按单字切。**双引号包 query 做�
 - 选型变化：最初计划 HTMX（无 npm），实测改为 SolidJS——聊天界面交互密集（流式渲染、历史切换、删除确认），HTMX 的 hx-swap 难以精细控制 SSE 流。前端仍 npm-free 部署（build 产物嵌入二进制）。
 - key bugs fixed（本轮）：① aiIdx 差一错误（Solid batch 导致 AI 消息永不显示）② 侧边栏流结束后不刷新（消息 persistence 在 SSE done 之后）③ 删除按钮 HTML 嵌套 button 警告
 - 预估：~1200 行 Rust + ~400 行 TSX。新增依赖：`axum`、`tower-http`、`tokio-stream`、`async-stream`、`rust-embed`。前端：`solid-js`、`daisyui`、`vite`、`@tailwindcss/vite`、`vite-plugin-solid`。
+
+**✅ M11 phase 1：系统托盘模式（lorag tray）**
+- 实现：`lorag tray [--port <N>]` 启动 axum server + 系统托盘图标（`tray-icon` crate），server 起来后 ~1s 浏览器自动打开；托盘菜单 Open Web UI / Quit（优雅关闭，5 秒超时强退）。
+- `src/tray.rs` 托盘核心（main thread 事件循环）；`src/server.rs` 加 `start_with_shutdown`，原 `start` 行为 100% 不变（内部委托 + `futures::future::pending()`）。
+- 新增依赖：`tray-icon` 0.19、`image` 0.25（png only）、`windows-sys` 0.59（Windows-only，pump Win32 message queue）。
+- 平台状态：Windows 已验证；macOS 需 `init_ns_app()` 后续；Linux 未验证。
 
 ### 🟡 中期（M11–M12）
 

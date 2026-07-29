@@ -10,6 +10,16 @@ lorag 的历史变更记录。**当前**架构 / 决策 / 限制见 [PLAN.md](PL
 
 **当前 release**：MIT / codeberg，rust 2021，0.1.0 crate version。
 
+### M11 phase 1 — 系统托盘模式（lorag tray）
+
+- 新增 `lorag tray` 命令：axum server + 系统托盘图标，浏览器启动后自动打开
+- `src/tray.rs` 托盘核心（tray-icon crate）；`src/server.rs` 加 `start_with_shutdown`（`start` 行为 100% 不变，内部委托 + `futures::future::pending()`）
+- 菜单：Open Web UI / Quit（优雅关闭，5 秒超时强退）
+- 跨平台打开浏览器：手写 `std::process::Command`（cmd/start, open, xdg-open），不引入 webbrowser crate
+- Windows-only 直接依赖 `windows-sys`：tray-icon 0.19 在 Windows 要求创建线程显式 pump Win32 message queue，否则菜单点击不触发（已是 tray-icon 传递依赖，零额外编译成本）
+- 平台状态：Windows 已验证；macOS 需 `init_ns_app()` 后续；Linux 未验证
+- Commit: (pending)
+
 ### Unreleased（M10.1 — Mermaid 图表渲染）
 
 - **Mermaid 图表渲染**：Web UI 聊天界面里 LLM 回复的 ` ```mermaid … ``` ` 代码块自动渲染成 SVG 图表（同主题色 + 响亮 Mermaid `default` / `dark` 主题随 daisyUI 主题切换初始化一次）。

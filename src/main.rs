@@ -156,6 +156,13 @@ enum Command {
         port: u16,
     },
 
+    /// 启动 Web UI + 系统托盘图标（办公用户友好模式，M11）
+    Tray {
+        /// 监听端口（默认 3000）
+        #[arg(long, default_value_t = 3000)]
+        port: u16,
+    },
+
     /// 清掉 LanceDB + SQLite 后重新摄入（换 embedding 模型后必须走这个）
     Reindex {
         /// 一个或多个文件 / 目录
@@ -295,6 +302,7 @@ fn run(cli: Cli) -> Result<()> {
             }
             Command::Doctor => cmd_doctor(&cfg),
             Command::Serve { port } => cmd_serve(&cfg, port).await,
+            Command::Tray { port } => cmd_tray(&cfg, port).await,
             Command::Reindex {
                 paths,
                 ext,
@@ -953,6 +961,85 @@ async fn cmd_serve(cfg: &config::AppConfig, port: u16) -> Result<()> {
     });
 
     server::start(state, port).await
+}
+
+/// `lorag tray` — 启动 Web UI + 系统托盘图标（M11 phase 1）。
+///
+/// 行为：
+/// - 在 tokio worker thread 上加载模型 + 启动 axum（带 graceful shutdown）
+/// - server 起来后 1 秒自动打开浏览器到 `http://localhost:{port}`
+/// - main thread 跑托盘事件循环（同步阻塞）——托盘图标显示 + 菜单可交互
+/// - 用户选 Quit → 通过 oneshot 通知 axum 优雅关闭 → 等最多 5 秒 → 进程退出
+///
+/// 为什么 main thread 跑 tray 而不是 tokio task：tray-icon 在 Windows / macOS 都要求
+/// 事件循环跑在创建托盘图标的同一个线程；当前 main thread 已被 `rt.block_on` 占用，
+/// 直接同步调用 `run_tray_loop` 即可，tokio worker threads 会继续驱动 background axum task。
+async fn cmd_tray(cfg: &config::AppConfig, port: u16) -> Result<()> {
+    use std::sync::Arc;
+
+    use lorag::aha_provider::AhaClient;
+    use lorag::server::{self, AppState};
+    use lorag::store::sqlite_store::SqliteStore;
+    use lorag::tray;
+
+    println!("lorag tray: starting on port {port}...");
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+    // Background task：加载模型 → 启动 axum（带 graceful shutdown）→ 自动开浏览器
+    let cfg_clone = cfg.clone();
+    let server_handle = tokio::spawn(async move {
+        println!("loading models (10s~minutes first time, seconds after)...");
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        let client = match AhaClient::init(cfg_clone.clone()).await {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("failed to init AhaClient: {e:#} (try `lorag models status` first)");
+                return;
+            }
+        };
+
+        let sqlite = match SqliteStore::open(&cfg_clone.sqlite_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "failed to open sqlite at {}: {e:#}",
+                    cfg_clone.sqlite_path.display()
+                );
+                return;
+            }
+        };
+
+        let state = Arc::new(AppState {
+            client: Arc::new(tokio::sync::Mutex::new(client)),
+            cfg: Arc::new(cfg_clone.clone()),
+            sqlite: Arc::new(tokio::sync::Mutex::new(sqlite)),
+        });
+
+        // 提前 1 秒自动开浏览器（等 axum bind 完成）
+        let url = format!("http://localhost:{port}");
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            if let Err(e) = tray::open_browser(&url) {
+                eprintln!("{e:#}");
+            }
+        });
+
+        // oneshot::Receiver<()> 的 Output 是 Result<(), RecvError>，map 成 ()
+        let shutdown_future = async move {
+            let _ = shutdown_rx.await;
+        };
+        if let Err(e) = server::start_with_shutdown(state, port, shutdown_future).await {
+            eprintln!("server error: {e:#}");
+        }
+    });
+
+    // Main thread：跑 tray 事件循环（同步阻塞，直到用户选 Quit）
+    let tray_result = tray::run_tray_loop(port, shutdown_tx);
+
+    // 等 axum graceful shutdown 完成，最多 5 秒（超时强退）
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server_handle).await;
+
+    tray_result
 }
 
 /// `lorag reindex` —— 删 LanceDB + SQLite 后重新摄入。

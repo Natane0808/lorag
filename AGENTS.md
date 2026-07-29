@@ -27,7 +27,7 @@
 - **`cargo fmt`** + **`cargo clippy --all-targets -- -D warnings`** + **`cargo test --lib`** 三件套**全过**才算完。
 - 模块 `snake_case`，类型 `PascalCase`，错误变体 `PascalCase`。
 - 公开 API 必须有 `///` 文档注释（**至少一个**可运行的例子，如果可以）。
-- 不引入 `unsafe`，除非有明确性能原因 + 注释解释。
+- 不引入 `unsafe`，除非有明确性能原因或平台 API 必需（如 Windows 消息泵、特定 FFI）+ 注释解释。
 
 ### 2.2 错误处理
 
@@ -94,6 +94,7 @@ config ──┬──→ aha_provider ─────┐    （★ 唯一 aha �
          ├──→ ingest ───────────┤    （6 种 loader + pipeline）
          ├──→ store ────────────┤    （lancedb + sqlite；store::lancedb_store 还管 HNSW 索引）
          ├──→ server ───────────┤    （M10 axum HTTP server + 嵌入式前端，SSE 流式 API）
+         ├──→ tray ─────────────┤    （M11 系统托盘：tray-icon 事件循环 + open_browser；依赖 server，不碰 aha/lancedb/sqlite）
          └──→ main (CLI)
 ```
 
@@ -244,6 +245,9 @@ config ──┬──→ aha_provider ─────┐    （★ 唯一 aha �
 | `tokio-stream` 0.1 + `async-stream` 0.3 | M10 SSE 流式响应 | |
 | `rust-embed` 8 | M10 嵌入式前端 | 打包 `web/dist/` 到二进制 |
 | `mermaid` ^11.12 | M10.1 前端图表渲染（前端依赖走 npm/bun，`web/package.json`） | 50+ diagram type Vite dynamic import 自动 code-split，未用不下载 |
+| `tray-icon` 0.19 | 系统托盘（M11 `lorag tray`） | 纯 Rust 跨 Win/macOS/Linux，无 GTK 依赖 |
+| `image` 0.25 | 解码 `assets/icon.png` → RGBA | `default-features = false` + `png` feature only |
+| `windows-sys` 0.59 | **Windows-only**：pump Win32 message queue，否则托盘菜单点击不触发 | features `Win32_UI_WindowsAndMessaging` + `Win32_Foundation`；已是 tray-icon 传递依赖，零额外编译成本 |
 
 加新依赖前**先**在这里登记。
 
