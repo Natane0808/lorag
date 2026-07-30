@@ -7,9 +7,13 @@ pub mod chunker;
 pub mod config;
 pub mod doctor;
 pub mod ingest;
+pub mod logging;
 pub mod models;
 pub mod rag;
 pub mod rig_compat;
 pub mod server;
 pub mod store;
 pub mod tray;
+
+#[cfg(feature = "gui")]
+pub mod gui;

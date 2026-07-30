@@ -3,6 +3,7 @@
 //! 任何业务模块都应通过 `AppConfig` 读环境变量，**不要**散落 `std::env::var`。
 //! 配置缺失或非法时直接 fail-fast，**不**给"看起来合理"的默认值掩盖错误。
 
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
@@ -39,20 +40,92 @@ const PROMPT_BARE_LLM_DEFAULT: &str =
 /// - 默认从当前目录读 `.env`
 /// - 可由 `LORAG_ENV=/path/to/.env` 覆盖
 /// - 已存在的环境变量优先级 > `.env` 里的值（dotenvy 默认行为）
+///
+/// 返回的 [`AppConfig`] 里 [`AppConfig::env_path`] 被填为实际加载路径（若文件存在），
+/// 后续 G10 设置页用它把修改写回同一个文件。
 pub fn load() -> Result<AppConfig> {
     let env_path = std::env::var("LORAG_ENV").unwrap_or_else(|_| ".env".to_string());
-    if Path::new(&env_path).exists() {
+    let path_owned = if Path::new(&env_path).exists() {
         dotenvy::from_path(&env_path)
             .with_context(|| format!("failed to load env file: {env_path}"))?;
+        Some(PathBuf::from(&env_path))
     } else {
         // 没找到不致命：用户可能用环境变量直接喂
         tracing::warn!("env file not found: {env_path} (relying on process env)");
-    }
+        None
+    };
     // dotenvy::from_path 已把 .env 加载到 process env，直接从 env 读
     let raw = RawConfig::from_env_manual(&env_path).context("failed to parse config from env")?;
-    let cfg: AppConfig = raw.into();
+    let mut cfg: AppConfig = raw.into();
+    cfg.env_path = path_owned;
     cfg.validate()?;
     Ok(cfg)
+}
+
+/// 仅从指定路径加载（不依赖 process env 当前状态）。
+///
+/// 流程：清空当前受 lorag 管理的环境变量集合 → 用 dotenvy::from_path_override
+/// 强制把该文件内容注入到 process env → 走 [`RawConfig::from_env_manual`] 解析。
+///
+/// 供 G10 设置页的"重置"按钮调用：用户在 UI 改了字段但没保存时，可以从磁盘上
+/// 当前 `.env` 重新加载一份干净的 [`AppConfig`]。
+///
+/// 注意：该函数会**覆盖** process env 里 `LORAG_*` / `LLM_MODEL` / ... 等 lorag
+/// 管理的变量。它不会清除用户在 shell 里设置的无关变量。
+pub fn reload_from_path(path: &Path) -> Result<AppConfig> {
+    clear_lorag_env();
+    let abs = path
+        .canonicalize()
+        .with_context(|| format!("failed to canonicalize env path: {}", path.display()))?;
+    if abs.exists() {
+        dotenvy::from_path_override(&abs)
+            .with_context(|| format!("failed to load env file: {}", abs.display()))?;
+    } else {
+        tracing::warn!(
+            "env file not found: {} (relying on defaults)",
+            abs.display()
+        );
+    }
+    let env_path_str = abs.to_string_lossy().to_string();
+    let raw = RawConfig::from_env_manual(&env_path_str)
+        .with_context(|| format!("failed to parse config from env: {}", abs.display()))?;
+    let mut cfg: AppConfig = raw.into();
+    cfg.env_path = Some(abs);
+    cfg.validate()?;
+    Ok(cfg)
+}
+
+/// lorag 管理的、在 `reload_from_path` 之前需要从 process env 清除的环境变量集合。
+/// （不在这列表里的变量——`RUST_LOG` / `LORAG_ENV` / PATH / 等——保持不动。）
+const LORAG_ENV_KEYS: &[&str] = &[
+    "LLM_MODEL",
+    "EMBED_MODEL",
+    "RERANK_MODEL",
+    "RERANK_TOP_N",
+    "MODELS_DIR",
+    "DOWNLOAD_MAX_RETRIES",
+    "LANCEDB_DIR",
+    "SQLITE_PATH",
+    "CHUNK_SIZE",
+    "CHUNK_OVERLAP",
+    "TOP_K",
+    "LOG_LEVEL",
+    "PROMPT_SYSTEM_ROLE",
+    "PROMPT_RAG_INSTRUCTION",
+    "PROMPT_CHAT_CONTEXT_INSTRUCTION",
+    "PROMPT_BARE_LLM",
+    "HYBRID_ENABLED",
+    "LORAG_GUI_PORT",
+];
+
+fn clear_lorag_env() {
+    // Safety: `std::env::remove_var` 在多线程场景下不与其他线程并发读写 env
+    // 时是安全的。G10 重置调用点在"设置页重置"按钮 handler 里串行触发，
+    // 且我们只清除 lorag 自己管理的一组 key（见 `LORAG_ENV_KEYS`），不会影响
+    // 其他任何系统 / tokio runtime 线程在这瞬间的 env 读取。
+    for k in LORAG_ENV_KEYS {
+        unsafe { std::env::remove_var(k) };
+    }
 }
 
 // =============================================================================
@@ -78,6 +151,7 @@ struct RawConfig {
     prompt_chat_context_instruction: String,
     prompt_bare_llm: String,
     hybrid_enabled: Option<bool>,
+    lorag_gui_port: Option<u16>,
 }
 
 impl RawConfig {
@@ -127,6 +201,11 @@ impl RawConfig {
                 .map(|s| s.parse::<bool>())
                 .transpose()
                 .context("HYBRID_ENABLED must be true or false")?,
+            lorag_gui_port: std::env::var("LORAG_GUI_PORT")
+                .ok()
+                .map(|s| s.parse::<u16>())
+                .transpose()
+                .context("LORAG_GUI_PORT must be a valid TCP port (1-65535)")?,
         })
     }
 }
@@ -183,9 +262,14 @@ impl From<RawConfig> for AppConfig {
                 r.prompt_bare_llm
             },
             hybrid_enabled: r.hybrid_enabled.unwrap_or(false),
+            lorag_gui_port: r.lorag_gui_port.unwrap_or(DEFAULT_GUI_PORT),
+            env_path: None,
         }
     }
 }
+
+/// 默认的本地 HTTP 服务端口（`lorag serve` / `lorag tray` / GUI 服务页一致）。
+const DEFAULT_GUI_PORT: u16 = 3000;
 
 // =============================================================================
 // 强类型 AppConfig
@@ -239,6 +323,13 @@ pub struct AppConfig {
     /// 小数据集（< 几百 chunk）下向量检索已足够；数据集大时开启互补。
     /// CLI 可用 `--no-hybrid` 临时关闭。
     pub hybrid_enabled: bool,
+    /// GUI 服务页启动 axum 时监听的 TCP 端口（G5 启动用，G10 可改）。默认 3000，
+    /// 与 `lorag serve` / `lorag tray` 默认保持一致。必须 1..=65535。
+    pub lorag_gui_port: u16,
+    /// 上次加载时 `.env` 文件的绝对路径（若存在）。G10 设置页"保存"时回写到
+    /// 同一个路径，而不是硬编码 `./.env`（避免用户通过 `LORAG_ENV` 指向别的路径后
+    /// GUI 保存到错的地方）。
+    pub env_path: Option<PathBuf>,
 }
 
 impl AppConfig {
@@ -271,6 +362,16 @@ impl AppConfig {
         if self.rerank_top_n == 0 {
             return Err(anyhow!("RERANK_TOP_N must be > 0"));
         }
+        if self.lorag_gui_port == 0 {
+            return Err(anyhow!("LORAG_GUI_PORT must be in range 1..=65535"));
+        }
+        if self.rerank_top_n <= self.top_k {
+            return Err(anyhow!(
+                "RERANK_TOP_N ({}) must be greater than TOP_K ({})",
+                self.rerank_top_n,
+                self.top_k
+            ));
+        }
         Ok(())
     }
 
@@ -278,5 +379,193 @@ impl AppConfig {
     /// 跟 `aha::utils::download_model` 的行为一致：它把模型下到 `<save_dir>/<model_id>/`。
     pub fn model_local_dir(&self, repo: &str) -> PathBuf {
         self.models_dir.join(repo)
+    }
+
+    /// 把当前配置写回 `.env`。
+    ///
+    /// - 原子写：先写到 `<path>.tmp` 再 [`fs::rename`]，避免写一半断电丢配置。
+    /// - 字段按下面固定顺序输出，顺序和 `.env.example` 对齐：
+    ///
+    ///   ```text
+    ///   LLM_MODEL=<...>
+    ///   EMBED_MODEL=<...>
+    ///   RERANK_MODEL=<...>
+    ///   MODELS_DIR=<...>
+    ///   LANCEDB_DIR=<...>
+    ///   SQLITE_PATH=<...>
+    ///   CHUNK_SIZE=<...>
+    ///   CHUNK_OVERLAP=<...>
+    ///   TOP_K=<...>
+    ///   RERANK_TOP_N=<...>
+    ///   HYBRID_ENABLED=<true/false>
+    ///   DOWNLOAD_MAX_RETRIES=<...>
+    ///   LORAG_GUI_PORT=<...>
+    ///   LOG_LEVEL=<...>
+    ///   PROMPT_SYSTEM_ROLE=<...>
+    ///   PROMPT_RAG_INSTRUCTION=<...>
+    ///   PROMPT_CHAT_CONTEXT_INSTRUCTION=<...>
+    ///   PROMPT_BARE_LLM=<...>
+    ///   ```
+    ///
+    /// - 多值（多行）自动转义为 JSON 单行字符串（带双引号、`\n` 转义）；
+    ///   单值如果含空白 / `#` / `"` / 含 `"="` 也会被 quote。
+    /// - 不写空 `RERANK_MODEL` 对应行为：留空字符串。
+    ///
+    /// 注：不会保留原始 `.env` 里的用户注释 / 空行顺序——它会**整体覆盖**文件。
+    /// 用户需要保留的注释建议放在单独的文档里（`.env.example` 已做）。
+    pub fn save_to_dotenv(&self, path: &Path) -> Result<()> {
+        let mut out = String::new();
+        out.push_str("# lorag .env — generated by `lorag-gui` settings page.\n");
+        out.push_str("# 手改也行，但会在下次 GUI 保存时被覆盖。\n\n");
+
+        out.push_str("# ===== Models =====\n");
+        push_kv(&mut out, "LLM_MODEL", &self.llm_model);
+        push_kv(&mut out, "EMBED_MODEL", &self.embed_model);
+        push_kv(&mut out, "RERANK_MODEL", &self.rerank_model);
+
+        out.push_str("\n# ===== Paths =====\n");
+        push_kv(&mut out, "MODELS_DIR", &path_to_str(&self.models_dir));
+        push_kv(&mut out, "LANCEDB_DIR", &path_to_str(&self.lancedb_dir));
+        push_kv(&mut out, "SQLITE_PATH", &path_to_str(&self.sqlite_path));
+
+        out.push_str("\n# ===== Retrieval =====\n");
+        push_kv(&mut out, "CHUNK_SIZE", &self.chunk_size.to_string());
+        push_kv(&mut out, "CHUNK_OVERLAP", &self.chunk_overlap.to_string());
+        push_kv(&mut out, "TOP_K", &self.top_k.to_string());
+        push_kv(&mut out, "RERANK_TOP_N", &self.rerank_top_n.to_string());
+        push_kv(
+            &mut out,
+            "HYBRID_ENABLED",
+            if self.hybrid_enabled { "true" } else { "false" },
+        );
+        push_kv(
+            &mut out,
+            "DOWNLOAD_MAX_RETRIES",
+            &self.download_max_retries.to_string(),
+        );
+
+        out.push_str("\n# ===== GUI =====\n");
+        push_kv(&mut out, "LORAG_GUI_PORT", &self.lorag_gui_port.to_string());
+
+        out.push_str("\n# ===== Logging =====\n");
+        push_kv(&mut out, "LOG_LEVEL", &self.log_level);
+
+        out.push_str("\n# ===== Prompts (留空用内置默认；多行文本存为 JSON 字面量) =====\n");
+        push_kv(&mut out, "PROMPT_SYSTEM_ROLE", &self.prompt_system_role);
+        push_kv(
+            &mut out,
+            "PROMPT_RAG_INSTRUCTION",
+            &self.prompt_rag_instruction,
+        );
+        push_kv(
+            &mut out,
+            "PROMPT_CHAT_CONTEXT_INSTRUCTION",
+            &self.prompt_chat_context_instruction,
+        );
+        push_kv(&mut out, "PROMPT_BARE_LLM", &self.prompt_bare_llm);
+
+        let tmp = path.with_extra_tmp_suffix();
+        fs::write(&tmp, out).with_context(|| {
+            format!(
+                "failed to write env tmp file at {}: check permissions / disk space",
+                tmp.display()
+            )
+        })?;
+        fs::rename(&tmp, path).with_context(|| {
+            format!(
+                "failed to rename env tmp -> {} (is the file locked by another process?)",
+                path.display()
+            )
+        })?;
+        Ok(())
+    }
+}
+
+/// 把 PathBuf 转为适合写入 `.env` 的字符串（保留原始分隔符）。
+fn path_to_str(p: &Path) -> String {
+    p.to_string_lossy().to_string()
+}
+
+/// 往 `.env` 文本 buffer 追加一行 `KEY=VALUE`。
+///
+/// 规则：
+/// - 空 value → `KEY=`
+/// - 含换行 → 用 JSON 字面量（双引号 + `\n` / `\"` / `\\` 转义）。
+///   加载端 dotenvy 会把双引号内的内容当作字符串，内部 `\n` 由我们在
+///   解析端（`RawConfig::from_env_manual`）反序列化回真实换行——但目前
+///   我们直接从 process env 拿到 `\n` 原样字符，所以 dotenvy 的标准
+///   quoted-value 解析够用。
+/// - 否则若含空白 / `#` / `"` / `=` 也 quote，dotenv 会正确去掉引号。
+/// - 其他情况直接 `KEY=VALUE`。
+fn push_kv(out: &mut String, key: &str, value: &str) {
+    if value.is_empty() {
+        out.push_str(key);
+        out.push_str("=\n");
+        return;
+    }
+    let needs_quote = value.contains('\n')
+        || value.contains('\r')
+        || value.contains('#')
+        || value.contains('"')
+        || value.contains(char::is_whitespace)
+        || value.contains('=');
+    if needs_quote {
+        out.push_str(key);
+        out.push('=');
+        out.push('"');
+        for c in value.chars() {
+            match c {
+                '\\' => out.push_str("\\\\"),
+                '"' => out.push_str("\\\""),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                other => out.push(other),
+            }
+        }
+        out.push('"');
+        out.push('\n');
+    } else {
+        out.push_str(key);
+        out.push('=');
+        out.push_str(value);
+        out.push('\n');
+    }
+}
+
+/// 方便写 `.tmp` 后缀的路径（避免引入 camino / 自己拼 OsStr）。
+trait EnvPathExt {
+    fn with_extra_tmp_suffix(&self) -> PathBuf;
+}
+
+impl EnvPathExt for Path {
+    fn with_extra_tmp_suffix(&self) -> PathBuf {
+        let mut s = self.as_os_str().to_os_string();
+        s.push(".tmp");
+        PathBuf::from(s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn push_kv_quote_rules() {
+        let mut s = String::new();
+        push_kv(&mut s, "FOO", "bar");
+        assert_eq!(s, "FOO=bar\n");
+
+        let mut s = String::new();
+        push_kv(&mut s, "FOO", "");
+        assert_eq!(s, "FOO=\n");
+
+        let mut s = String::new();
+        push_kv(&mut s, "FOO", "a b");
+        assert_eq!(s, "FOO=\"a b\"\n");
+
+        let mut s = String::new();
+        push_kv(&mut s, "FOO", "line1\nline2");
+        assert_eq!(s, "FOO=\"line1\\nline2\"\n");
     }
 }

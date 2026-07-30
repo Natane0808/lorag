@@ -434,7 +434,10 @@ async fn handle_delete_session(
 /// Serve a file from `FrontendAssets` (embedded `web/dist/`).
 ///
 /// SPA fallback: unknown paths serve `index.html` so the SolidJS router handles them.
-async fn serve_static(uri: Uri) -> Response {
+///
+/// `pub(crate)` so the GUI service page can inline bind/serve (to insert a "ready"
+/// signal between TcpListener::bind and axum::serve for its state machine).
+pub(crate) async fn serve_static(uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
     let path = if path.is_empty() { "index.html" } else { path };
 

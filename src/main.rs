@@ -220,21 +220,10 @@ fn main() -> ExitCode {
     // 先加载 .env，让 LOG_LEVEL 在 tracing init 时可用
     let _ = dotenvy::dotenv();
 
-    // 默认静默 lance / lancedb / datafusion / arrow 的 INFO 日志。
-    // RUST_LOG > LOG_LEVEL > 默认 `info`。lance silencing 是必加后缀。
-    // env_filter target 段是字面量（不支持 glob），必须显式列全。
-    let lance_silence = ",lance::dataset_events=warn,lance::execution=warn,lance::io_events=warn,\
-lance::file_audit=warn,lancedb=warn,datafusion=warn,arrow=warn";
-    let base = std::env::var("RUST_LOG")
-        .or_else(|_| std::env::var("LOG_LEVEL"))
-        .unwrap_or_else(|_| "info".to_string());
-    let full_filter = format!("{base}{lance_silence}");
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&full_filter)),
-        )
-        .init();
+    if let Err(e) = lorag::logging::init_tracing(false, None) {
+        eprintln!("error: failed to init logging: {e:#}");
+        return ExitCode::FAILURE;
+    }
 
     let cli = Cli::parse();
     match run(cli) {

@@ -1,12 +1,12 @@
 # lorag
 
-> **完全本地运行的 RAG CLI**：把多格式文档（pdf / docx / pptx / xlsx / md / txt）摄入本地
+> **完全本地运行的 RAG**：把多格式文档（pdf / docx / pptx / xlsx / md / txt）摄入本地
 > LanceDB + SQLite，然后用本地 LLM 一次性问答或开多轮对话。所有推理走 [aha](https://github.com/jhqxxx/aha)
 > Rust crate 库内调用，**不**起 HTTP server、**不**调云。
 >
-> A fully-local Agent RAG CLI. Ingest multi-format documents into local LanceDB + SQLite, then
-> ask one-shot RAG questions or chat with history, powered by [aha](https://github.com/jhqxxx/aha)
-> in-process inference.
+> 三种使用方式：**桌面 GUI（M12，双击 exe 即开即用）** / **Web UI（`lorag serve`，浏览器聊天）** / **CLI（命令行）**。
+>
+> A fully-local RAG with three frontends: native GPUI desktop launcher (M12), browser Web UI (`lorag serve`), and CLI. Ingest multi-format documents into local LanceDB + SQLite, ask one-shot questions or chat with history, powered by [aha](https://github.com/jhqxxx/aha) in-process inference.
 
 [![Rust](https://img.shields.io/badge/rust-2021-orange.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -25,6 +25,7 @@
 - **M9 混合检索（opt-in）**：SQLite FTS5 BM25 + 向量 RRF 融合，大文档量时开启
 - **M10 Web UI**：`lorag serve` 启动 axum + SolidJS + daisyUI，浏览器聊天界面，SSE 流式渲染，支持 Mermaid 图表（流式 chunk、失败降级、原码回退）
 - **M11 系统托盘模式**：`lorag tray` 启动 Web UI + 系统托盘常驻，浏览器自动打开，右键托盘可退出——零命令行体验
+- **M12 桌面 GUI**：基于 GPUI（gpui-component）原生桌面启动器，双击 exe 即开即用，7 张页面（服务/模型/文档摄入/健康检查/日志/设置/关于）+ 系统托盘常驻，开箱即用面对办公小白；聊天走浏览器 Web UI
 - **M8 Prompt 可配置**：4 个 `PROMPT_*` 字段覆盖默认（默认含 5 条防注入铁律）
 - **可观测**：每步 ingestion 打印进度；query 跑出 RAG 命中 / fallback
 - **GPU 加速可选**：默认 CPU 跑；NVIDIA GPU 加 `--features cuda`
@@ -32,9 +33,46 @@
 
 ---
 
-## 🚀 快速开始 / Quick Start
+## 🖥️ 桌面端（M12） / Desktop GUI
 
-需要 [Rust 2021+](https://rustup.rs/) 和 Git。
+普通用户**推荐使用桌面 GUI**（不需要 Rust / 命令行）：
+
+1. 从 [Release 页面](https://codeberg.org/natane/lorag/releases) 下载 Windows MSI 安装包
+2. 双击安装（默认装到 `%LOCALAPPDATA%\lorag\`，不需要管理员权限）
+3. 双击桌面 `lorag-gui` 图标启动，7 张页面覆盖全流程：
+   - **服务**：启动/停止本地服务，点"打开聊天"自动开浏览器
+   - **模型**：下载/刷新 LLM、Embedding、Rerank 模型状态
+   - **文档**：选择文件/文件夹摄入（原生对话框），显示已摄入源
+   - **健康检查**：11 项环境自检
+   - **日志**：实时滚动日志，可过滤/导出/打开日志文件夹
+   - **设置**：图形化编辑 `.env`，保存后重启生效
+   - **关于**：版本、技术栈、快捷入口
+4. 关窗口不退出——常驻系统托盘；右键托盘 → 显示窗口 / 打开聊天 / 退出。聊天始终在浏览器里（SSE 流式 + Mermaid 图表，同 M10 Web UI）。
+
+> GPU 要求：需要支持 DirectX 11/12 的显卡（绝大多数 2015 年后的机器都行）；没有 GPU 加速时会弹友好提示，可退回 CLI 使用。
+
+### 打包 Windows MSI（开发者 / 发布者）
+
+生成 Windows MSI 安装包（给办公小白双击安装用）三步：
+
+```bash
+# 1. 先编译 release 版本（CUDA + GUI feature 都要）
+cargo build --release --features cuda --features gui
+
+# 2. 一次性安装 cargo-wix 子命令（需要 WiX Toolset v3.14+ 已在 PATH）
+cargo install cargo-wix --locked
+
+# 3. 生成 MSI（产物：target\wix\lorag-0.1.0-x86_64.msi）
+cargo wix
+```
+
+安装包默认装到 `%LOCALAPPDATA%\lorag\`（用户级，不需要管理员权限），自带桌面 + 开始菜单快捷方式指向 `lorag-gui.exe`，在"设置 → 应用"里可正常卸载。WiX 模板见 [`wix/main.wxs`](wix/main.wxs)（3 个稳定 GUID 已提交，不要重新生成）。**不要**把 `target\wix\*.msi` 提交到 git（`target/` 已在 `.gitignore`）。
+
+---
+
+## 🚀 快速开始 / Quick Start（开发者 CLI）
+
+需要 [Rust 2024+](https://rustup.rs/) 和 Git。
 
 ```bash
 # 1. 克隆
@@ -109,6 +147,7 @@ cargo build --features cuda
 | `cuda` | NVIDIA GPU 加速（推荐 RTX 3060+） | CUDA Toolkit 12.x + nvcc + MSVC |
 | `flash-attn` | 配合 cuda 加速 attention | 需要先有 `cuda` |
 | `metal` | macOS Apple Silicon GPU | Xcode CLI tools |
+| `gui` | M12 GPUI 桌面 GUI（`lorag-gui`） | 支持 DirectX 11/12 / Metal / Vulkan 的显卡 |
 
 > **⚠️ 不要用 `cargo build` 日常循环**——`cargo build`（无 feature）会**覆盖** CUDA 二进制为 CPU-only 版本。改完代码后**必须**用 `cargo build --features cuda` 保住 GPU 加速（CPU 跑 4B 15-30s/query，CUDA 1-3s/query）。
 > 第一次 CUDA 编译要 5-10 分钟（cudnn + cublas 全 link）。编译时需要 CUDA Toolkit，**运行时**只要 NVIDIA 驱动（带 `cudart64_12.dll` / `libcudart.so`）就够了。
@@ -151,6 +190,8 @@ lorag chat                          # 多轮对话 REPL（带 SQLite 历史 + RA
 lorag serve [--port <N>]                # 启动 Web UI（axum + SolidJS，localhost:3000）
 
 lorag tray [--port <N>]                 # 启动 Web UI + 系统托盘图标（M11 桌面集成）
+
+lorag-gui [--port <N>]                  # 启动桌面 GUI 启动器（M12，GPUI 原生 7 页 + 托盘；需 `--features gui` 编译）
 
 lorag doctor                        # 11 项环境检查（env / models / storage / features）
 ```
@@ -221,21 +262,29 @@ lorag/
 ├── LICENSE                     # MIT
 ├── src/
 │   ├── main.rs                 # CLI 入口（clap 分派）
+│   ├── gui_main.rs             # M12 GUI 入口（GPUI + 托盘）
 │   ├── lib.rs                  # 模块声明
-│   ├── config.rs               # .env 加载 + 强类型 AppConfig
+│   ├── config.rs               # .env 加载 + 强类型 AppConfig + save_to_dotenv
+│   ├── logging.rs              # 公共 tracing init（CLI/GUI 共用）
 │   ├── aha_provider.rs         # ★ 唯一 aha 入口 + 模型生命周期 + rerank
 │   ├── rig_compat.rs           # AhaCompletionModel + AhaEmbeddingModel
 │   ├── rag.rs                  # RAG 主流程（手写 lancedb native）+ chat preamble
 │   ├── chunker.rs              # 段落 + 字符滑窗切块
 │   ├── models.rs               # SourceRecord / Chunk / MessageRecord
 │   ├── doctor.rs               # 11 项环境检查
+│   ├── tray.rs                 # 系统托盘（M11）+ open_browser（GUI 复用）
 │   ├── ingest/                 # 6 种 loader + pipeline
 │   │   ├── loader.rs           # 按扩展名分派
 │   │   ├── pdf.rs / docx.rs / pptx.rs / xlsx.rs / md.rs / txt.rs
 │   │   └── pipeline.rs
-│   └── store/                  # lancedb_store + sqlite_store
-│       ├── lancedb_store.rs    # 建表 / HNSW 索引
-│       └── sqlite_store.rs     # sources / chunks / messages
+│   ├── store/                  # lancedb_store + sqlite_store
+│   │   ├── lancedb_store.rs    # 建表 / HNSW 索引
+│   │   └── sqlite_store.rs     # sources / chunks / messages
+│   └── gui/                    # M12 GPUI 桌面 GUI（feature = gui）
+│       ├── app.rs / root_view.rs / sidebar.rs / tray_host.rs
+│       ├── gpu_probe.rs / fallback_dialog.rs / logging.rs
+│       ├── service.rs / models.rs / ingest.rs / doctor.rs / logs.rs / settings.rs / about.rs
+│       └── pages/
 └── tests/                      # cargo test（fixtures/ 已 gitignore）
 ```
 
@@ -252,8 +301,10 @@ lorag/
 - ✅ M9 混合检索（SQLite FTS5 BM25 + 向量 RRF 融合，opt-in）—— 默认关闭，大文档量时开启（`DFDB` / 数字日期都召回失败）
 - ✅ M10 Web UI（`lorag serve` → axum + SolidJS + daisyUI，SSE 流式浏览器聊天界面）
 - ✅ M10.1 Mermaid 图表渲染（Web UI 增强：`utils/markdown.ts` 预提取 + `utils/mermaid.ts` 串行渲染队列 + svgCache 跨流式复用）
+- ✅ M11 系统托盘（`lorag tray` → tray-icon 跨平台托盘，浏览器自动打开）
+- ✅ M12 GPUI 桌面 GUI（`lorag-gui` → zed GPUI + gpui-component，7 页启动器 + 托盘常驻，双击 exe 即开即用）
 - 📋 M11 CI（Codeberg CI / `.forgejo/workflows/ci.yml`）
-- 📋 M12 MCP server（把 `lorag` 暴露成 MCP tools，让 IDE agent 直接调）
+- 📋 M13 MCP server（把 `lorag` 暴露成 MCP tools，让 IDE agent 直接调）
 - 📋 Backlog：tool calling / 多知识库 / 模型量化 / 评估框架增强 / rerank 价值验证 / 发布到 crates.io
 
 完整规划见 [`PLAN.md`](PLAN.md)；按优先级和触发条件标在 [PLAN.md §11](PLAN.md)。

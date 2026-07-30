@@ -6,6 +6,39 @@ lorag 的历史变更记录。**当前**架构 / 决策 / 限制见 [PLAN.md](PL
 
 ---
 
+## Unreleased（M12 — GPUI 桌面启动器 / lorag-gui）
+
+### M12 — GPUI 桌面启动器（lorag-gui）
+
+面向办公小白的第四个前端：**双击 exe 即开即用**的原生 GPUI 桌面启动器。CLI 保留但不再推送给非技术用户。
+
+- **新二进制 `lorag-gui`**：`[[bin]]` + `required-features = ["gui"]`，基于 zed GPUI + longbridge `gpui-component`（git pin rev `57a9903f48160845aabc8b92a1e2f5348c80d439`）。聊天**不嵌入** GPUI——点"打开聊天"按钮 → 浏览器开 `localhost:port`（复用 M10 Web UI + SSE + Mermaid）。
+- **7 张页面 sidebar 启动器**：
+  - 服务（`service.rs`）：4 状态机 Stopped/Starting/Running/Stopping + oneshot 关断 + 5s 超时；"打开聊天"按钮复用 `tray::open_browser`。
+  - 模型（`models.rs`）：LLM / Embedding / Rerank（留空优雅降级）三行 + download spinner + refresh。
+  - 文档摄入（`ingest.rs`）：`rfd::FileDialog` 原生选文件/文件夹 + per-entry 状态机 + `SqliteStore::list_sources`；`init_embed_only` Case B 策略不跨页共享 AhaClient。
+  - 健康检查（`doctor.rs`）：`spawn_blocking` 跑 `doctor::run_checks`，3 列 grid + PASS/WARN/FAIL 汇总横幅。
+  - 日志（`logs.rs`）：实时 tail + level 下拉着色 + 自动滚到底 epsilon 判定 + 打开日志文件夹/导出。
+  - 设置（`settings.rs`）：5 组 17 字段表单 + HYBRID 开关 + `AppConfig::save_to_dotenv()` 原子写（`.tmp` → rename）+ "需重启"横幅。
+  - 关于（`about.rs`）：版本/技术栈/相关链接，按钮→`tray::open_browser` 或跨平台开数据/日志目录。
+- **托盘共存（`tray_host.rs`）**：独立 OS thread 跑 tray-icon 0.19 事件循环 + Win32 message pump（避免跟 GPUI smol executor 抢线程），`std::sync::mpsc` → `tokio::spawn_blocking` → `AsyncApp`（`AsyncApp: !Send`）桥接；关闭窗口 `on_window_should_close` 返回 false + `window.minimize_window()` 最小化到托盘；托盘双击 = Show Window；Quit = `cx.quit()` + on_app_will_quit 关 axum。
+- **GPU probe（`gpu_probe.rs` + `fallback_dialog.rs`）**：启动时 blade GPU 探测，失败用 `windows-sys MessageBoxW` 弹友好原生对话框后 `exit(1)`（gpui 起不来时兜底，不 panic）。
+- **公共 tracing init 抽到 `src/logging.rs`**：`init_tracing(use_file_appender: bool)`；CLI 保持 stderr only；GUI 模式追加 `tracing-appender` 滚动文件（`%APPDATA%/lorag/logs/lorag.log.YYYY-MM-DD`，daily、保留 7 天）+ broadcast channel（容量 256）→ GUI 日志页。
+- **桥接模式**：tokio runtime 在 GUI 启动时建一次，整个进程复用；所有同步阻塞（candle 推理 / `std::fs` / `rfd::FileDialog` 原生 modal loop / `std::process::Command`）一律 `tokio::spawn_blocking`；结果经 GPUI `cx.spawn` + `cx.update` 推回 UI thread——这是 G5-G12 一致的模式，绝不阻塞 UI。
+- **新增依赖**（全部 optional behind `gui` feature flag；默认 `cargo build` 不拉 GPUI，CLI 日常迭代保持快）：
+  - `gpui = { git = "https://github.com/zed-industries/zed", optional = true }`
+  - `gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "runtime_shaders"], optional = true }`
+  - `gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "57a9903f...", optional = true }`
+  - `gpui-component-assets`（同源同 rev，图标/字体资源）
+  - `rfd = { version = "0.15", optional = true }`（跨平台原生文件对话框）
+  - `tracing-appender = { version = "0.2", optional = true }`（磁盘滚动日志）
+- **`src/config.rs` 新增 `AppConfig::save_to_dotenv()`**：原子写 `.env`，供设置页保存。
+- **验证**：G0–G12 全过；`cargo build --features cuda --features gui` exit 0；`cargo clippy --all-targets --features cuda --features gui -- -D warnings` 零警告；`cargo test --lib --features cuda --features gui` 66 个单元测试全过（无回归）。Windows 端到端验证：窗口 + 7 页 + 服务起停 + 托盘双击唤起 + X 最小化到托盘 + Quit 干净退出。
+- **未做（后续）**：G13 开机自启（auto-launch）、G14 MSI 打包（cargo-wix）、macOS/Linux 打包验证；聊天永远走浏览器（不嵌 GPUI）。
+- Commit: (pending)
+
+---
+
 ## v0.1（current） — M0 到 M8 全实装
 
 **当前 release**：MIT / codeberg，rust 2021，0.1.0 crate version。
