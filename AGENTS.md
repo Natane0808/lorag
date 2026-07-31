@@ -1,7 +1,7 @@
 # lorag — Agent 协作规范
 
 > 写给在 `lorag` 仓库里工作的 agent（我、未来的我、接手的 agent）看的工作约定。
-> **项目范围 / 架构 / 命令 / 配置 / 限制** 见 [PLAN.md](PLAN.md)；**历史** 见 [CHANGELOG.md](CHANGELOG.md)。
+> **项目范围 / 架构 / 命令 / 配置 / 限制** 见 [PLAN.md](PLAN.md) + [README.md](README.md) + [doc/](doc/)。
 > **本文件只规定怎么写代码、怎么做事。**
 
 ---
@@ -47,7 +47,7 @@
 
 - **配置单一来源**：`.env`（由 `dotenvy` 加载）+ 强类型 `AppConfig`（`src/config.rs`）。
 - **永远不要** `std::env::var("...")` 在业务代码里散落读环境变量，全部走 `AppConfig`。
-- 新增配置项时**同时**改 3 处：`src/config.rs` 加 `AppConfig` 字段 + 解析 + validate / `.env.example` 加注释 / [PLAN.md §6.1](PLAN.md) 同步。
+- 新增配置项时**同时**改 3 处：`src/config.rs` 加 `AppConfig` 字段 + 解析 + validate / `.env.example` 加注释 / [PLAN.md §4.1](PLAN.md) 同步。
 - 配置缺失或非法时 fail-fast，**不要**给"看起来合理"的默认值掩盖错误。
 - 本项目**没有端口 / base_url / health 配置**——aha 用 crate 调用，HTTP 概念不存在。
 
@@ -110,7 +110,7 @@ config ──┬──→ aha_provider ─────┐    （★ 唯一 aha �
 - **`gui`**（`src/gui/`，M12 GPUI 桌面启动器）：7 张页面 sidebar 启动器（服务 / 模型 / 文档摄入 / 健康检查 / 日志 / 设置 / 关于）+ 托盘常驻 + tokio↔GPUI channel 桥接。依赖 `tray::open_browser`（复用跨平台开浏览器逻辑）、`server::start_with_shutdown`、`aha_provider`、`config`、`store::sqlite_store`，**不**直接 `use aha::*` / `use rig_compat::*` / 碰 chunker；所有 aha 调用、RAG、ingest 走既有 lib API（`spawn_blocking` 包同步阻塞；GPU/同步 IO 绝不能上 GPUI UI thread）。Windows 托盘双击唤起 + X 按钮最小化到托盘。
 - **本项目没有 `aha_runner` 模块**——所有 aha 交互（推理 + 下载）都在 `aha_provider` 内完成。
 
-新加模块时，先在 [PLAN.md §5](PLAN.md) 标位置，然后才写代码。
+新加模块时，先在 [PLAN.md §3](PLAN.md) 标位置，然后才写代码。
 
 ---
 
@@ -125,7 +125,7 @@ config ──┬──→ aha_provider ─────┐    （★ 唯一 aha �
 
 ### 4.2 LanceDB schema 是**契约**
 
-- 当前 schema：见 [PLAN.md §6.4](PLAN.md)。改 schema = 不向后兼容。
+- 当前 schema：见 [PLAN.md §4.4](PLAN.md)。改 schema = 不向后兼容。
 - 改 schema 时**先**在 `src/store/lancedb_store.rs` 写明 + 更新 PLAN.md，然后**清空** `data/lancedb/` + `data/lorag.db[-wal/-shm/-journal]`。
 - `EMBED_MODEL` 改了 = 重建 = 走 `lorag reindex`（**不要**手动 `rm`，reindex 还管交互确认 + sqlite 旁文件）。
 
@@ -169,7 +169,7 @@ config ──┬──→ aha_provider ─────┐    （★ 唯一 aha �
 1. 在 `src/ingest/` 加 `myformat.rs`，实现 `pub fn extract(path: &Path) -> Result<String>`。
 2. 在 `src/ingest/loader.rs` 的分派表加一行 `Some("ext") => myformat::extract(path)`。
 3. 在 `src/ingest/mod.rs` 加 `pub mod myformat;`。
-4. 在 [PLAN.md §6.5](PLAN.md) 的 loader 列表加一行。
+4. 在 [PLAN.md §4.5](PLAN.md) 的 loader 列表加一行。
 5. 在 `src/ingest/myformat.rs` 同文件加 `#[cfg(test)]` 单元测试（最小 fixture + 空文件 + 缺文件）。
 6. 跑 `lorag ingest fixtures/sample.ext` 端到端验证。
 
@@ -178,18 +178,18 @@ config ──┬──→ aha_provider ─────┐    （★ 唯一 aha �
 1. 在 `src/main.rs` 的 `Cli`（clap derive）加新 variant。
 2. 实现函数放 `src/<module>.rs` 的 `pub async fn cmd_xxx(...) -> anyhow::Result<()>`。
 3. `main` 里 `match cli.command { ... }` 分派。
-4. 在 [PLAN.md §7](PLAN.md) 加一行 + [README.md §Commands](README.md) 同步。
+4. 在 [doc/usage.md](doc/usage.md) 加一行 + [README.md](README.md) 同步。
 
 ### 5.3 改配置 schema
 
 1. 改 `AppConfig`，加 `#[serde(default = "...")]` 给旧 `.env` 兼容期。
 2. 改 `.env.example`（带注释 + 默认值）。
-3. 改 [PLAN.md §6.1](PLAN.md) 字段表。
+3. 改 [PLAN.md §4.1](PLAN.md) 字段表。
 4. 跑 `cargo test --lib` 验证 validate 不会拒绝老 `.env`。
 
 ### 5.4 rig Provider / aha 集成升级
 
-升级 `aha` / `rig` / `rig-lancedb` / `lancedb` 前**必看**：[CHANGELOG.md §集成 bug](CHANGELOG.md) + aha / rig 官方 CHANGELOG。
+升级 `aha` / `rig` / `rig-lancedb` / `lancedb` 前**必看**：[AGENTS.md §2 / §4](AGENTS.md) 通用约定 + 关键实现约定（含 aha 集成 + 流式 bridge + 防注入 + 集成坑），aha / rig 官方 CHANGELOG。
 
 - **aha 升级**：重新校验 `WhichModel` 枚举值、模型路径接口、消息格式、`download_model` 签名。
 - **rig 升级**（0.40 → 0.41+）：通常 breaking，**重点看** `client/completion.rs` + `client/embeddings.rs` + `completion/request.rs` 的 `OneOrMany` 是否还是 struct、`CompletionModel::make` / `EmbeddingModel::make` 签名有没有变。
@@ -269,7 +269,7 @@ config ──┬──→ aha_provider ─────┐    （★ 唯一 aha �
 ## 8. 参考资料
 
 - **PLAN.md**（[lorag 架构 + 决策 + 限制](PLAN.md)）— 必读
-- **CHANGELOG.md**（[历史 + bug 教训](CHANGELOG.md)）— 排查 / 升级前必看
+- **AGENTS.md §2 + §4**（通用约定 + 关键实现约定，含 aha 集成避坑 / 流式 channel bridge / 防注入 4 层 / 集成坑）— 排查 / 升级前必看
 - aha GitHub：https://github.com/jhqxxx/aha
 - aha 源码（本地）：`D:/workspace/rust/aha/`
 - aha lib 用法（参考 server 实现）：`aha/src/server/api.rs:5-7, 36-56`
@@ -286,16 +286,16 @@ config ──┬──→ aha_provider ─────┐    （★ 唯一 aha �
 ## 9. 与 Mavis 协作的约定
 
 - 接到需求时**先**读 [PLAN.md](PLAN.md) + 本文件 + 涉及的具体 `src/<module>.rs` 顶部 doc 注释，再动代码。
-- 改 [PLAN.md](PLAN.md) / [AGENTS.md](AGENTS.md) / [README.md](README.md) / [CHANGELOG.md](CHANGELOG.md) 时尽量在同一 commit 里改，别拆。
-- **每个阶段完成时**（milestone / feature / refactor 收尾），四份文档都要核 + 同步：
-  - **PLAN.md**：架构 / 命令 / 决策变了 → 更新对应章节；新增限制 → §9；新增未来方向 → §11
-  - **AGENTS.md**：新硬规矩 / 禁止事项 → §6；新模块约定 → §3；新依赖 → §7；commit 规则调整 → §9
-  - **README.md**：命令清单变了 → §命令；路线图 ✅/📋 状态变了 → §路线图；快速开始有重大变化 → §快速开始
-  - **CHANGELOG.md**：每个阶段在"Unreleased"或新版本块加一段（变更点 + 关键 commit + 验证方式 + 关键经验）
-  - **判断标准**：用户读 README 能不能 5 分钟跑起来？读 PLAN 能不能理解当前架构？读 AGENTS 能不能知道所有硬规矩？读 CHANGELOG 能不能回溯历史？任何一项"不能"就回去改
+- 改 [PLAN.md](PLAN.md) / [AGENTS.md](AGENTS.md) / [README.md](README.md) 时尽量在同一 commit 里改，别拆。
+- **每个阶段完成时**（milestone / feature / refactor 收尾），三份主文档 + `doc/` 子文档都要核 + 同步：
+  - **PLAN.md**：架构 / 决策变了 → 更新对应章节；新增限制 → §5
+  - **AGENTS.md**：新硬规矩 / 禁止事项 → §6；新模块约定 → §3；新依赖 → §7；commit 规则调整 → §9；新避坑经验 → §2 / §4（按主题加）
+  - **README.md**：命令清单变了 → 更新链接的 doc/usage.md；快速开始有重大变化 → 更新 §快速开始
+  - **doc/usage.md** / **doc/configuration.md** / **doc/architecture.md** / **doc/gui.md** / **doc/development.md**：根据实际变更更新对应文档
+  - **判断标准**：用户读 README 能不能 5 分钟跑起来？读 doc/architecture.md 能不能理解当前架构？读 AGENTS.md 能不能知道所有硬规矩？任何一项"不能"就回去改
 - 写完一段代码后跑 `cargo fmt && cargo clippy --all-targets -- -D warnings && cargo test --lib`，**全过**才算完。
 - 报错优先自查本文件 §5 常见任务工作流 + §6 禁止事项，不要重复问相同问题。
-- 用户没说要 chat / web UI / streaming / tool calling 时**不要**自作主张加（[PLAN.md §11](PLAN.md) 标了优先级，按触发条件做）。
+- 用户没说要 chat / web UI / streaming / tool calling 时**不要**自作主张加（参考 [PLAN.md §5](PLAN.md) 当前限制，按需求触发决定）。
 - 可以用 Python 脚本辅助开发（写 fixture / 跑 eval / 数据处理），但**不**要提交到 git——临时脚本放 `tests/scratch/`（已 gitignore `*.out` `*.err`，整目录不进仓）。
 - 本项目只调 aha crate 库 API，**不**调 aha CLI 二进制（任何要 spawn `aha ...` 子进程的方案都是错的）。
 - 涉及真实业务数据（公司名 / 真人名 / 内部系统名 / 业务术语）时**绝不**入仓——开发脚本、test fixture、doc 例子都要 scrub。

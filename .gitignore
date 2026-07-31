@@ -30,6 +30,16 @@ nohup.out
 *.log.*
 # 测试 fixture（占空间 + 是临时数据；tests/*.rs 仍可提交）
 tests/fixtures/
+# 开发辅助脚本 / 临时数据；不进入仓库
+tests/scratch/
+# AI agent 运行时状态（session 续传 / 笔记 / 计划），本机私人用，不入仓
+.omo/
+# skill 锁文件（自动生成，含第三方 skill 哈希）
+skills-lock.json
+# Cargo example 目录的占位文件——examples/ 下不放东西则整目录不入仓
+/examples/
+# codegraph 索引文件（自动重建，~5MB SQLite DB + daemon log）
+.codegraph/
 # Windows 保留设备名（dir nul 永远存在，加进去 git 就不报 untracked）
 nul
 

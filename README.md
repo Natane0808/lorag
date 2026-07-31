@@ -1,342 +1,103 @@
 # lorag
 
 > **完全本地运行的 RAG**：把多格式文档（pdf / docx / pptx / xlsx / md / txt）摄入本地
-> LanceDB + SQLite，然后用本地 LLM 一次性问答或开多轮对话。所有推理走 [aha](https://github.com/jhqxxx/aha)
+> LanceDB + SQLite，本地 LLM 一次性问答或开多轮对话。所有推理走 [aha](https://github.com/jhqxxx/aha)
 > Rust crate 库内调用，**不**起 HTTP server、**不**调云。
 >
-> 三种使用方式：**桌面 GUI（M12，双击 exe 即开即用）** / **Web UI（`lorag serve`，浏览器聊天）** / **CLI（命令行）**。
->
-> A fully-local RAG with three frontends: native GPUI desktop launcher (M12), browser Web UI (`lorag serve`), and CLI. Ingest multi-format documents into local LanceDB + SQLite, ask one-shot questions or chat with history, powered by [aha](https://github.com/jhqxxx/aha) in-process inference.
+> 三种使用方式：**桌面 GUI**（双击 exe）/ **Web UI**（浏览器聊天）/ **CLI**（命令行）。
 
-[![Rust](https://img.shields.io/badge/rust-2021-orange.svg)](https://www.rust-lang.org)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Codeberg](https://img.shields.io/badge/codeberg-lorag-blue.svg)](https://codeberg.org/natane/lorag)
 
 ---
 
-## ✨ 特点 / Features
+## 选哪种前端？
 
-- **完全本地**：模型、向量库、元数据全在你机器上，没任何外部服务
-- **6 种格式摄入**：pdf / docx / pptx / xlsx / md / txt，sha256 幂等
-- **多轮对话**：REPL 带 SQLite 历史 + RAG 检索
-- **可选 rerank**：配 `RERANK_MODEL=` 即启用（aha `Qwen3-Reranker-0.6B`），召回 +15-25%
-- **M8 流式输出**：aha → lorag mpsc 通道，token 级逐字打印；CPU 跑 4B 不再"干等 15-30 秒"
-- **M8 4 层防注入**：① sanitize ② chunk 边界包裹 ③ 系统 prompt 5 条铁律 ④ recency bias 尾注
-- **M9 混合检索（opt-in）**：SQLite FTS5 BM25 + 向量 RRF 融合，大文档量时开启
-- **M10 Web UI**：`lorag serve` 启动 axum + SolidJS + daisyUI，浏览器聊天界面，SSE 流式渲染，支持 Mermaid 图表（流式 chunk、失败降级、原码回退）
-- **M11 系统托盘模式**：`lorag tray` 启动 Web UI + 系统托盘常驻，浏览器自动打开，右键托盘可退出——零命令行体验
-- **M12 桌面 GUI**：基于 GPUI（gpui-component）原生桌面启动器，双击 exe 即开即用，7 张页面（服务/模型/文档摄入/健康检查/日志/设置/关于）+ 系统托盘常驻，开箱即用面对办公小白；聊天走浏览器 Web UI
-- **M8 Prompt 可配置**：4 个 `PROMPT_*` 字段覆盖默认（默认含 5 条防注入铁律）
-- **可观测**：每步 ingestion 打印进度；query 跑出 RAG 命中 / fallback
-- **GPU 加速可选**：默认 CPU 跑；NVIDIA GPU 加 `--features cuda`
-- **明确不做**：工具调用（Backlog）
+| 场景 | 推荐 | 怎么进 |
+|---|---|---|
+| 办公小白，双击就能用 | **桌面 GUI** | 双击 `lorag-gui.exe`（MSI 安装后） |
+| 想要聊天、历史、图表 | **Web UI** | `lorag serve` → 浏览器自动打开 |
+| 写脚本、CI、纯命令行 | **CLI** | `lorag ingest / query / chat` |
+
+所有前端共享同一份数据（`./data/`），任意切换。
 
 ---
 
-## 🖥️ 桌面端（M12） / Desktop GUI
+## ✨ 特性
 
-普通用户**推荐使用桌面 GUI**（不需要 Rust / 命令行）：
+- **完全本地**：模型、向量库、元数据都在你机器上
+- **6 种格式摄入**：pdf / docx / pptx / xlsx / md / txt（sha256 幂等）
+- **多轮对话 + RAG**：SQLite 历史 + 检索增强；M8 起 token 级流式输出
+- **可选 rerank**：配 `RERANK_MODEL=` 启用，召回 +15-25%
+- **M8 4 层防注入**：sanitize + chunk 边界包裹 + 系统铁律 + recency bias
+- **M9 混合检索（opt-in）**：BM25 + 向量 RRF 融合，大文档量时互补
+- **M10 Web UI**：axum + SolidJS + daisyUI，SSE 流式 + Mermaid 图表
+- **M11 系统托盘** / **M12 GPUI 桌面 GUI**：开箱即用面对办公小白
+- **NVIDIA CUDA 可选加速**；`flash-attn` / `metal` 也支持
 
-1. 从 [Release 页面](https://codeberg.org/natane/lorag/releases) 下载 Windows MSI 安装包
-2. 双击安装（默认装到 `%LOCALAPPDATA%\lorag\`，不需要管理员权限）
-3. 双击桌面 `lorag-gui` 图标启动，7 张页面覆盖全流程：
-   - **服务**：启动/停止本地服务，点"打开聊天"自动开浏览器
-   - **模型**：下载/刷新 LLM、Embedding、Rerank 模型状态
-   - **文档**：选择文件/文件夹摄入（原生对话框），显示已摄入源
-   - **健康检查**：11 项环境自检
-   - **日志**：实时滚动日志，可过滤/导出/打开日志文件夹
-   - **设置**：图形化编辑 `.env`，保存后重启生效
-   - **关于**：版本、技术栈、快捷入口
-4. 关窗口不退出——常驻系统托盘；右键托盘 → 显示窗口 / 打开聊天 / 退出。聊天始终在浏览器里（SSE 流式 + Mermaid 图表，同 M10 Web UI）。
-
-> GPU 要求：需要支持 DirectX 11/12 的显卡（绝大多数 2015 年后的机器都行）；没有 GPU 加速时会弹友好提示，可退回 CLI 使用。
-
-### 打包 Windows MSI（开发者 / 发布者）
-
-生成 Windows MSI 安装包（给办公小白双击安装用）三步：
-
-```bash
-# 1. 先编译 release 版本（CUDA + GUI feature 都要）
-cargo build --release --features cuda --features gui
-
-# 2. 一次性安装 cargo-wix 子命令（需要 WiX Toolset v3.14+ 已在 PATH）
-cargo install cargo-wix --locked
-
-# 3. 生成 MSI（产物：target\wix\lorag-0.1.0-x86_64.msi）
-cargo wix
-```
-
-安装包默认装到 `%LOCALAPPDATA%\lorag\`（用户级，不需要管理员权限），自带桌面 + 开始菜单快捷方式指向 `lorag-gui.exe`，在"设置 → 应用"里可正常卸载。WiX 模板见 [`wix/main.wxs`](wix/main.wxs)（3 个稳定 GUID 已提交，不要重新生成）。**不要**把 `target\wix\*.msi` 提交到 git（`target/` 已在 `.gitignore`）。
+明确不做：tool calling（暂不需要）。
 
 ---
 
-## 🚀 快速开始 / Quick Start（开发者 CLI）
+## 🚀 快速开始（5 分钟跑起来）
 
 需要 [Rust 2024+](https://rustup.rs/) 和 Git。
 
 ```bash
-# 1. 克隆
+# 1. 克隆 + 准备配置
 git clone https://codeberg.org/natane/lorag.git
 cd lorag
+cp .env.example .env       # 按需改模型 id（默认 4B LLM + 0.6B Embedding）
 
-# 2. 配置：拷贝 .env.example 改成 .env，按需改模型 id
-cp .env.example .env
+# 2. 编译（首次 5-10 分钟 CUDA，之后增量 30 秒）
+cargo build --features cuda
 
-# 3. 下载模型（首次需要联网 + ~2GB 空间）
+# 3. 下载模型（首次联网 + ~2GB 空间）
 lorag models pull
 
-# 4. 摄入文档
+# 4. 摄入文档 + 提问
 lorag ingest path/to/your/docs/
-
-# 5. 问问题
 lorag query "文档里讲了什么？"
-
-# 6.（可选）开多轮对话
-lorag chat
+lorag chat                  # 多轮对话 REPL
 ```
 
-**默认模型**（4B LLM + 0.6B Embedding 起步，性价比最优点）：
-
-- LLM：`Qwen/Qwen3-4B`（CUDA 1-3s/query，CPU 15-30s/query；M8 起 token 级流式输出，不再"干等 30s"）
-- Embedding：`Qwen/Qwen3-Embedding-0.6B`（1024 维，质量比 MiniLM 显著好；维度自动读，不用配）
-- Rerank（**可选**）：`Qwen/Qwen3-Reranker-0.6B`（**留空 = 禁用**，懒加载，第一次 query 才 load）
-- **Prompt 可配置**（M8）：4 个 `PROMPT_*` 字段覆盖默认（默认含 5 条防注入铁律 + recency bias 尾注，详见 [`.env.example`](.env.example)）
-
-> **CUDA 推荐**：`cargo build --features cuda` 重 build 一次，4B 在 RTX 4080 SUPER 上能跑到 1-3s/query。
-> **0.6B 起步**也行：纯 CPU 也能跑（~5s/query），但 LLM 答非所问率较高，复杂问题会失望。
-
-完整支持的模型列表见 [aha supported-models.zh-CN.md](https://github.com/jhqxxx/aha/blob/main/docs/supported-models.zh-CN.md)。
-
-### 换 embedding 模型（会让向量维度变）
-
-1. 改 `.env` 里的 `EMBED_MODEL`
-2. 跑 `lorag models pull`（下新模型）
-3. 跑 `lorag reindex <path>` 重新摄入（**自动**清 LanceDB + SQLite + 重新 ingest 一次）
-
-> 向量维度不需要手动配——`lorag` 启动时自动从 embedding 模型的 `config.json::hidden_size` 读出来。
-> 想看 `reindex` 会做什么但不真跑：`lorag reindex --dry-run <path>`。
-
-只换 LLM（不改 embedding）不用清数据库——只更新 `LLM_MODEL` + `lorag models pull` 就行。
-
----
-
-## 🛠️ 编译 / Build
+**Web UI 用户**：
 
 ```bash
-# 默认（CPU only，~30s 增量 / 几分钟首次）
-cargo build
-
-# 跑测试
-cargo test --lib
-
-# Release 优化（首次 link 5-10 分钟，之后 incremental ~30s）
-cargo build --release
+lorag serve                 # 浏览器自动打开 localhost:3000
 ```
 
-### GPU 加速（NVIDIA CUDA）
+**桌面 GUI 用户**（需 `--features gui` 编译）：见 [doc/gui.md](doc/gui.md)。
 
-要 RTX/GTX 跑得更快：
-
-```bash
-# 编译时启用 CUDA（需要 CUDA Toolkit 12.x + nvcc + MSVC）
-cargo build --features cuda
-```
-
-| Feature | 用途 | 前置 |
-|---------|------|------|
-| `cuda` | NVIDIA GPU 加速（推荐 RTX 3060+） | CUDA Toolkit 12.x + nvcc + MSVC |
-| `flash-attn` | 配合 cuda 加速 attention | 需要先有 `cuda` |
-| `metal` | macOS Apple Silicon GPU | Xcode CLI tools |
-| `gui` | M12 GPUI 桌面 GUI（`lorag-gui`） | 支持 DirectX 11/12 / Metal / Vulkan 的显卡 |
-
-> **⚠️ 不要用 `cargo build` 日常循环**——`cargo build`（无 feature）会**覆盖** CUDA 二进制为 CPU-only 版本。改完代码后**必须**用 `cargo build --features cuda` 保住 GPU 加速（CPU 跑 4B 15-30s/query，CUDA 1-3s/query）。
-> 第一次 CUDA 编译要 5-10 分钟（cudnn + cublas 全 link）。编译时需要 CUDA Toolkit，**运行时**只要 NVIDIA 驱动（带 `cudart64_12.dll` / `libcudart.so`）就够了。
+> **CUDA 推荐**：`cargo build --features cuda` 让 4B 在 RTX 4080 SUPER 上跑到 1-3s/query；
+> 不带 feature 会盖回 CPU 二进制（4B 退化到 15-30s/query）。详见 [doc/install.md](doc/install.md)。
+>
+> **0.6B LLM 起步也行**：纯 CPU ~5s/query，但答非所问率较高，复杂问题会失望。
 
 ---
 
-## 📖 命令 / Commands
+## 📖 文档导航
 
-```
-lorag init                          # 把 LLM + embedding 加载到内存（debug 用；query/chat 隐式调）
-lorag models pull                   # 下载 LLM + embedding + rerank（rerank 留空跳过）
-lorag models status [--init]        # 看模型文件存在性 + 可选真 load 验证
-
-lorag ingest <PATH>...              # 摄入文件/目录（默认递归）
-    --ext pdf,docx,pptx,xlsx,md,txt # 默认全 6 种
-    --force                         # 强制重摄入（无视 hash）
-    --no-recursive                  # 不递归子目录
-
-lorag reindex <PATH>...             # 清 LanceDB + SQLite 后重新 ingest（换 EMBED_MODEL 后必须走这个）
-    --yes / -y                      # 跳过 interactive 确认
-    --dry-run                       # 只打印会做什么
-
-lorag sources list [--json]         # 列出已摄入文件
-
-lorag query <QUESTION>              # 一次性 RAG 问答（M8 起 token 级流式输出）
-    --top-k <N>                     # 覆盖 cfg.top_k
-    --no-rerank                     # 跳过 rerank（即使 .env 配了 RERANK_MODEL）
-    --rerank-top-n <N>              # 覆盖 cfg.rerank_top_n
-    --no-hybrid                     # 关闭混合检索
-
-lorag chat                          # 多轮对话 REPL（带 SQLite 历史 + RAG；M8 起 token 级流式输出；进程内连续，跨进程不续接）
-    --message <TEXT>                # 一次性首问（不读 stdin）
-    --no-history                    # 不带历史（每轮独立）
-    --no-banner                     # 安静启动
-    --no-rag                        # 纯 LLM 对话（关闭 RAG 上下文；防注入 1-2 层不生效）
-    --no-rerank / --rerank-top-n <N>
-    --no-hybrid
-    --top-k <N>
-
-lorag serve [--port <N>]                # 启动 Web UI（axum + SolidJS，localhost:3000）
-
-lorag tray [--port <N>]                 # 启动 Web UI + 系统托盘图标（M11 桌面集成）
-
-lorag-gui [--port <N>]                  # 启动桌面 GUI 启动器（M12，GPUI 原生 7 页 + 托盘；需 `--features gui` 编译）
-
-lorag doctor                        # 11 项环境检查（env / models / storage / features）
-```
-
-错误一律 `anyhow` 打到 stderr，exit 1。`.env` 路径默认当前目录，可由 `LORAG_ENV` 环境变量覆盖。
+| 主题 | 文档 |
+|---|---|
+| 编译 / CUDA / MSI 打包 | [doc/install.md](doc/install.md) |
+| 命令清单 + 日常工作流 | [doc/usage.md](doc/usage.md) |
+| `.env` 字段含义 | [doc/configuration.md](doc/configuration.md) |
+| 数据流 + 模块边界 + aha 集成 | [doc/architecture.md](doc/architecture.md) |
+| M12 桌面 GUI 使用 | [doc/gui.md](doc/gui.md) |
+| 接手开发者（dev loop / 排错） | [doc/development.md](doc/development.md) |
+| 架构 + 模块设计（Rust API 级） | [PLAN.md](PLAN.md) |
+| AI agent 协作规范（避坑 + 硬规矩） | [AGENTS.md](AGENTS.md) |
 
 ---
 
-## 🧠 工作原理 / How It Works
+## 📜 License
 
-```
-   ┌─────────────┐
-   │ 你的文档     │ PDF / DOCX / PPTX / XLSX / MD / TXT
-   └──────┬──────┘
-          │ ingest (sha256 幂等)
-          ▼
-   ┌─────────────┐    ┌──────────────┐
-   │  chunker    │───▶│  aha embed   │  (Qwen3-Embedding-0.6B, 1024-dim)
-   └─────────────┘    └──────┬───────┘
-                             │
-                  ┌──────────┴──────────┐
-                  ▼                     ▼
-           ┌─────────────┐      ┌──────────────┐
-           │  LanceDB    │      │   SQLite     │
-           │  (向量)     │      │  (元数据)    │
-           └──────┬──────┘      └──────────────┘
-                  │
-   你的问题 ──── embed ────▶ top-k 检索 ──┐
-                  │                       │
-                  │ FTS5 BM25 ────────────┤
-                  ▼                       ▼
-                                 RRF 融合 (可选)
-                                         │
-                                         ▼
-                                  [可选] rerank
-                                         │
-                                         ▼
-                                  拼 context (history + chunks)
-                                         │
-                                         ▼
-                              ┌──────────────────┐
-                              │  aha LLM (Qwen3) │
-                              └────────┬─────────┘
-                                       ▼
-                                    答案
-```
+MIT，详见 [LICENSE](LICENSE)。
 
-- **LLM / Embedding / Rerank 推理**：[aha](https://github.com/jhqxxx/aha) Rust crate（Candle 内核）
-- **RAG 编排**：[rig](https://rig.rs) 0.40 框架（自定义 Provider 适配 aha，**手写** lancedb native
-  query——绕开 `dynamic_context` 那个 62GB 内存 bug）
-- **向量库**：LanceDB 0.30（≥256 chunks 时自动建 IVF-HNSW-FLAT 索引）
-- **元数据**：SQLite（rusqlite bundled）
-
-详细设计见 [`PLAN.md`](PLAN.md)；历史变更见 [`CHANGELOG.md`](CHANGELOG.md)；协作约定见 [`AGENTS.md`](AGENTS.md)。
-
----
-
-## 🗂️ 项目结构 / Project Structure
-
-```
-lorag/
-├── Cargo.toml                  # 依赖 + aha path 依赖
-├── .env.example                # 配置模板
-├── README.md                   # ← 本文件
-├── PLAN.md                     # 当前架构 + 决策 + 限制 + 未来
-├── CHANGELOG.md                # 历史变更 + bug 教训
-├── AGENTS.md                   # agent 协作规范
-├── LICENSE                     # MIT
-├── src/
-│   ├── main.rs                 # CLI 入口（clap 分派）
-│   ├── gui_main.rs             # M12 GUI 入口（GPUI + 托盘）
-│   ├── lib.rs                  # 模块声明
-│   ├── config.rs               # .env 加载 + 强类型 AppConfig + save_to_dotenv
-│   ├── logging.rs              # 公共 tracing init（CLI/GUI 共用）
-│   ├── aha_provider.rs         # ★ 唯一 aha 入口 + 模型生命周期 + rerank
-│   ├── rig_compat.rs           # AhaCompletionModel + AhaEmbeddingModel
-│   ├── rag.rs                  # RAG 主流程（手写 lancedb native）+ chat preamble
-│   ├── chunker.rs              # 段落 + 字符滑窗切块
-│   ├── models.rs               # SourceRecord / Chunk / MessageRecord
-│   ├── doctor.rs               # 11 项环境检查
-│   ├── tray.rs                 # 系统托盘（M11）+ open_browser（GUI 复用）
-│   ├── ingest/                 # 6 种 loader + pipeline
-│   │   ├── loader.rs           # 按扩展名分派
-│   │   ├── pdf.rs / docx.rs / pptx.rs / xlsx.rs / md.rs / txt.rs
-│   │   └── pipeline.rs
-│   ├── store/                  # lancedb_store + sqlite_store
-│   │   ├── lancedb_store.rs    # 建表 / HNSW 索引
-│   │   └── sqlite_store.rs     # sources / chunks / messages
-│   └── gui/                    # M12 GPUI 桌面 GUI（feature = gui）
-│       ├── app.rs / root_view.rs / sidebar.rs / tray_host.rs
-│       ├── gpu_probe.rs / fallback_dialog.rs / logging.rs
-│       ├── service.rs / models.rs / ingest.rs / doctor.rs / logs.rs / settings.rs / about.rs
-│       └── pages/
-└── tests/                      # cargo test（fixtures/ 已 gitignore）
-```
-
----
-
-## 🛣️ 路线图 / Roadmap
-
-- ✅ M0–M5：CLI / aha 加载 / 6 种 loader / chunker / SQLite / LanceDB / RAG 端到端
-- ✅ M5.1 `lorag reindex`：换 EMBED_MODEL 后清库重建
-- ✅ M6：`lorag doctor` 11 项环境检查
-- ✅ M7 `lorag chat`：多轮 REPL + SQLite 历史 + RAG fallback
-- ✅ M7.1 Rerank（可选）：Qwen3-Reranker 懒加载 + `--no-rerank` + `RERANK_TOP_N` 可配
-- ✅ M8 流式输出 + 4 层防注入 + 4 个 PROMPT_* 可配 + XLSX 多 sheet 行前缀
-- ✅ M9 混合检索（SQLite FTS5 BM25 + 向量 RRF 融合，opt-in）—— 默认关闭，大文档量时开启（`DFDB` / 数字日期都召回失败）
-- ✅ M10 Web UI（`lorag serve` → axum + SolidJS + daisyUI，SSE 流式浏览器聊天界面）
-- ✅ M10.1 Mermaid 图表渲染（Web UI 增强：`utils/markdown.ts` 预提取 + `utils/mermaid.ts` 串行渲染队列 + svgCache 跨流式复用）
-- ✅ M11 系统托盘（`lorag tray` → tray-icon 跨平台托盘，浏览器自动打开）
-- ✅ M12 GPUI 桌面 GUI（`lorag-gui` → zed GPUI + gpui-component，7 页启动器 + 托盘常驻，双击 exe 即开即用）
-- 📋 M11 CI（Codeberg CI / `.forgejo/workflows/ci.yml`）
-- 📋 M13 MCP server（把 `lorag` 暴露成 MCP tools，让 IDE agent 直接调）
-- 📋 Backlog：tool calling / 多知识库 / 模型量化 / 评估框架增强 / rerank 价值验证 / 发布到 crates.io
-
-完整规划见 [`PLAN.md`](PLAN.md)；按优先级和触发条件标在 [PLAN.md §11](PLAN.md)。
-
----
-
-## 🤝 贡献 / Contributing
-
-欢迎 PR / Issue。本项目走个人 codeberg scope（[`codeberg.org/natane/lorag`](https://codeberg.org/natane/lorag)），主要自己用，但 **PR 全收**。
-
-开发循环：
-
-```bash
-cargo build --features cuda    # 保住 CUDA 二进制
-cargo clippy --all-targets --features cuda -- -D warnings
-cargo test --lib --features cuda
-```
-
-CI 没配（个人项目），跑上面三个当 self-check。**改完代码后必须**用 `cargo build --features cuda`——`cargo build`（无 feature）会盖掉 CUDA 二进制（详见 [PLAN.md §10 经验](PLAN.md)）。
-
-> **敏感数据**：开发脚本 / test fixture / doc 例子**绝不**入公司名 / 真人名 / 内部系统名 / 业务术语。
-
----
-
-## 📜 协议 / License
-
-MIT，见 [LICENSE](LICENSE)。
-
----
-
-## 🙏 致谢 / Credits
+## 🙏 Credits
 
 - [aha](https://github.com/jhqxxx/aha) — 本地 LLM / Embedding / Rerank 推理引擎，本项目的核心
 - [rig](https://rig.rs) — Rust Agent 框架
 - [LanceDB](https://lancedb.github.io/lancedb/) — 嵌入式向量数据库
+- [GPUI](https://github.com/zed-industries/zed) + [gpui-component](https://github.com/longbridge/gpui-component) — M12 桌面 GUI 框架
