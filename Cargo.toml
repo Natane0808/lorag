@@ -26,9 +26,9 @@ path = "src/gui_main.rs"
 required-features = ["gui"]
 
 [dependencies]
-# ===== 核心：aha 推理 crate（path 依赖） =====
-# 发布到 crates.io 时改 `aha = "0.2.6"`
-aha = { path = "D:/workspace/rust/aha" }
+# ===== 核心：aha 推理 crate（git 依赖，pin 到 main 分支） =====
+# 发布到 crates.io 时改 `aha = "0.2.6"`；切 tag 后改成 `tag = "vX.Y.Z"`
+aha = { git = "https://github.com/jhqxxx/aha.git", branch = "main" }
 
 # ===== 异步运行时 =====
 # rt-multi-thread + macros 必备（spawn_blocking + #[tokio::main]）

@@ -227,7 +227,7 @@ config ──┬──→ aha_provider ─────┐    （★ 唯一 aha �
 
 | 依赖 | 用途 | 备注 |
 |------|------|------|
-| `aha = { path = "D:/workspace/rust/aha" }` | **核心**：aha 推理 + 模型下载 + rerank | 本地 path 依赖；发布时改 `"0.2.6"` |
+| `aha = { git = "https://github.com/jhqxxx/aha.git", branch = "main" }` | **核心**：aha 推理 + 模型下载 + rerank | git 依赖，pin main 分支；发布时改 `"0.2.6"`，aha 切 tag 后改 `tag = "vX.Y.Z"` |
 | `rig` **0.40** | LLM / agent / embedding 框架 | `default-features = false`（不用 reqwest/derive/rustls）；锁 0.40.x |
 | `lancedb` 0.30 | 向量库（**手写 native API**） | 走 `vector_search.limit(k).execute` + `RecordBatch` 流；不依赖 rig-lancedb |
 | `arrow-array` 58 + `arrow-schema` 58 | RecordBatch / StringArray | lancedb 0.30 拉入；`StringArray::value(i)` 返回 `&str` |
