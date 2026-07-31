@@ -46,9 +46,9 @@ config ──┬──→ aha_provider ──────┐    （★ 唯一 ah
          ├──→ chunker ──────────┤
          ├──→ ingest ───────────┘    （6 种 loader + pipeline）
          ├──→ store ─────────────┐   （lancedb + sqlite；store::lancedb_store 还管 HNSW 索引）
-         ├──→ server ────────────┤   （M10 axum HTTP server + 嵌入式前端，SSE 流式 API）
-         ├──→ tray ──────────────┤   （M11 系统托盘：tray-icon 事件循环 + open_browser）
-         ├──→ gui ───────────────┘   （M12 GPUI 桌面启动器：7 页 sidebar + 托盘）
+         ├──→ server ────────────┤   （axum HTTP server + 嵌入式前端，SSE 流式 API）
+         ├──→ tray ──────────────┤   （系统托盘：tray-icon 事件循环 + open_browser）
+         ├──→ gui ───────────────┘   （GPUI 桌面启动器：7 页 sidebar + 托盘）
          └──→ main (CLI)
 ```
 
@@ -85,7 +85,7 @@ user question
   → 启用 rerank → rerank_score → 排序取 top_k
   → 拼 context (history + chunks) → preamble
   → AhaCompletionModel::completion(req)
-  → 打印答案（流式 token 输出，M8 起）
+  → 打印答案（流式 token 输出，起）
 ```
 
 **回退路径**：LanceDB 任何错误（目录不存在 / 表不存在 / 内存不够）→ `bare_llm_query` 走裸 LLM（`is_recoverable_error` 关键字匹配）。这是有意的，让 LLM 在检索挂的时候还能答。
@@ -121,16 +121,16 @@ use clap::ValueEnum;                                          // WhichModel::fro
 
 LLM 推理 `GenerateModel::generate(mes)` 同步阻塞 —— **必须** `tokio::task::spawn_blocking` 包，否则会卡死 tokio reactor。
 
-**坑 4：流式 channel bridge（M8）**
+**坑 4：流式 channel bridge**
 
 `generate_stream` 返回的 stream 生命周期绑 `&mut self`，不能从 `spawn_blocking` 闭包 return。解法走 `mpsc::channel(64)` 桥接：
 
 ```rust
 let (tx, rx) = mpsc::channel(64);
 spawn_blocking(move || {
-    let mut g = llm.blocking_lock();
+    let mut g = llm.blocking_lock;
     let mut stream = g.generate_stream(params)?;
-    rt.block_on(async { while let Some(chunk) = stream.next().await { tx.blocking_send(chunk).ok(); } });
+    rt.block_on(async { while let Some(chunk) = stream.next.await { tx.blocking_send(chunk).ok; } });
 });
 rx
 ```
@@ -147,11 +147,11 @@ rx
 | `source_path` | `Utf8` | 原始文件路径 |
 | `chunk_ordinal` | `Int64` | 该文件里的第几块 |
 | `text` | `Utf8` | chunk 文本 |
-| `embedding` | `FixedSizeList<Float64, N>` | N 从 `AhaClient.embed_dim()` 来 |
+| `embedding` | `FixedSizeList<Float64, N>` | N 从 `AhaClient.embed_dim` 来 |
 
 ⚠️ **改 schema = 不向后兼容**。改时**先**在 `src/store/lancedb_store.rs` 写明 + 更新本文件 + 跑 `lorag reindex` 重建。
 
-**HNSW 索引**：`store::lancedb_store::ensure_hnsw_index` 在 ingest 写完 lancedb 后调；`< 256 rows` 跳过，≥ 256 且没建过则建 IVF-HNSW-FLAT（`IvfHnswFlatIndexBuilder::default()`）。
+**HNSW 索引**：`store::lancedb_store::ensure_hnsw_index` 在 ingest 写完 lancedb 后调；`< 256 rows` 跳过，≥ 256 且没建过则建 IVF-HNSW-FLAT（`IvfHnswFlatIndexBuilder::default`）。
 
 ---
 
@@ -161,25 +161,25 @@ rx
 |---|---|---|
 | `sources` | `source_path` UNIQUE, `source_hash` | sha256 幂等摄入 |
 | `chunks` | `(source_id, chunk_ordinal)` UNIQUE, `text` | chunk 元数据 + FTS5 源 |
-| `chunks_fts` | FTS5 虚拟表（`unicode61` tokenizer） | BM25 全文检索 |
+| `chunks_fts` | FTS5 虚拟表（`unicode61` tokenizer） | B全文检索 |
 | `messages` | `session_id`, `ordinal` | chat 多轮历史 |
 
-**FTS5 关键设计**：用 OR 语义（`build_fts5_query` 提取拉丁/数字 token + 中文单字），BM25 自动把匹配更多 token 的文档排前面。
+**FTS5 关键设计**：用 OR 语义（`build_fts5_query` 提取拉丁/数字 token + 中文单字），B自动把匹配更多 token 的文档排前面。
 
 中文用 unicode61 按单字切，**双引号包 query 做短语搜索会要求所有单字 token 精确连续出现**——自然语言查询中的补白词（"了什么"、"怎么做"）几乎不会同时出现在文档中，导致 0 匹配。所以默认走 OR 语义。
 
 ---
 
-## 混合检索（M9 opt-in）
+## 混合检索（opt-in）
 
 开启 `HYBRID_ENABLED=true` 时：
 
 1. `vector_search` 取 `top_k * 3`（至少 10）条
-2. SQLite FTS5 BM25 搜索取同等条数
+2. SQLite FTS5 B搜索取同等条数
 3. RRF（Reciprocal Rank Fusion，k=60）两路分数合并 → 取 `top_k`
 4. 混合检索启用时**不走 rerank**（RRF 直接输出最终 top_k）
 
-**默认关闭**：小数据集（几十 chunk）下向量检索已覆盖大部分文档，BM25 查询结果高度重合 → RRF 融合无额外收益，只有开销。大文档量（100+ 文件、1000+ chunk）时 `true` 开启互补召回精确关键词（人名、日期、编号）。
+**默认关闭**：小数据集（几十 chunk）下向量检索已覆盖大部分文档，B查询结果高度重合 → RRF 融合无额外收益，只有开销。大文档量（100+ 文件、1000+ chunk）时 `true` 开启互补召回精确关键词（人名、日期、编号）。
 
 ---
 
@@ -195,9 +195,9 @@ rx
 | `ingest/` | 6 种 loader + pipeline |
 | `store/lancedb_store` | LanceDB 建表 / 写 / HNSW 索引 / vector_search |
 | `store/sqlite_store` | sources / chunks / chunks_fts / messages + FTS5 |
-| `server` | M10 axum HTTP server（仅 Web UI / Tray / GUI 用） |
-| `tray` | M11 系统托盘（tray-icon + open_browser 跨平台） |
-| `gui` | M12 GPUI 桌面启动器（7 页 sidebar + 托盘 + 服务桥接） |
+| `server` | axum HTTP server（仅 Web UI / Tray / GUI 用） |
+| `tray` | 系统托盘（tray-icon + open_browser 跨平台） |
+| `gui` | GPUI 桌面启动器（7 页 sidebar + 托盘 + 服务桥接） |
 | `logging` | 公共 tracing init（CLI stderr only / GUI 追加滚动文件） |
 | `doctor` | 11 项环境检查 |
 

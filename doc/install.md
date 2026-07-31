@@ -6,7 +6,7 @@
 
 ## 1. 前置依赖
 
-- Rust 1.85+（支持 Rust 2024  edition）
+- Rust 1.85+（支持 Rust 2024 edition）
 - Git（克隆仓库）
 - 平台支持：Windows 10+ / Linux 64-bit / macOS 14+（支持 Apple Silicon 和 Intel）
 - 其他编译依赖随功能开启，见下文各章节。
@@ -35,7 +35,7 @@ cargo test --lib
 | `cuda` | NVIDIA GPU 加速（推荐 RTX 3060 及以上显卡 | CUDA Toolkit 12.x + `nvcc` + MSVC（Windows）/ GCC（Linux） |
 | `flash-attn` | 配合 `cuda` 加速 attention 计算 | 需要先启用 `cuda` 功能 |
 | `metal` | macOS Apple Silicon GPU 加速 | Xcode Command Line Tools |
-| `gui` | M12 GPUI 桌面启动器（生成 `lorag-gui` 可执行文件） | 支持 DirectX 11/12 / Metal / Vulkan 的显卡 |
+| `gui` | GPUI 桌面启动器（生成 `lorag-gui` 可执行文件） | 支持 DirectX 11/12 / Metal / Vulkan 的显卡 |
 
 ---
 
@@ -75,7 +75,7 @@ cargo build --features metal
 
 ---
 
-## 6. M12 GPUI 桌面 GUI 编译
+## 6. GPUI 桌面 GUI 编译
 
 编译带桌面启动器需要同时启用 `gui` 功能：
 ```bash

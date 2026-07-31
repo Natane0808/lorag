@@ -1,6 +1,6 @@
-# 桌面 GUI / Desktop GUI (M12)
+# 桌面 GUI / Desktop GUI 
 
-> `lorag-gui` 是 M12 GPUI 桌面启动器 —— **不是聊天客户端**。聊天永远走浏览器 Web UI。
+> `lorag-gui` 是 GPUI 桌面启动器 —— **不是聊天客户端**。聊天永远走浏览器 Web UI。
 > 本页讲给终端用户的使用说明 + 给开发者的编译细节。
 
 ---
@@ -30,13 +30,11 @@
 - **关窗口不退出** —— 常驻系统托盘
 - **双击托盘图标** = 显示窗口
 - **右键托盘菜单**：显示窗口 / 打开聊天 / 退出
-- **Quit 走 graceful shutdown**：托盘 Quit → 关 axum 服务（5 秒超时强退）→ `cx.quit()`
+- **Quit 走 graceful shutdown**：托盘 Quit → 关 axum 服务（5 秒超时强退）→ `cx.quit`
 
 ### 主题
 
-- **Tokyo Night**（深色）
-- **Ayu**（浅色）
-- 主题切换基于 GPUI 内置主题（`themes/tokyonight.json` + `themes/ayu.json` 是跟踪的）
+- **深色** / **浅色** 两档切换
 
 ### 没显卡怎么办
 
@@ -83,8 +81,8 @@ cargo run --features cuda --features gui --bin lorag-gui
 - aha candle 推理、`std::fs`、`rfd::FileDialog`（原生 modal loop 阻塞）、`std::process::Command` 一律放 tokio `spawn_blocking`（tokio runtime 在 GUI 启动时建一次，整个进程复用），**绝不能上 GPUI UI thread**
 - tokio runtime + GPUI smol executor 共存；同步阻塞经 `cx.spawn` + `cx.update` 推回 UI thread
 - 独立 OS thread 跑 tray-icon 0.19 事件循环 + Win32 message pump（避免跟 GPUI smol executor 抢线程），`std::sync::mpsc` → `tokio::spawn_blocking` → `AsyncApp` 桥接（`AsyncApp: !Send`）
-- 配置单一来源：设置页改完写回 `.env`（`AppConfig::save_to_dotenv()` 原子写 `.tmp`→rename），不引入 GUI 专属配置文件
-- 关闭窗口：`on_window_should_close` 返回 false + `window.minimize_window()` 最小化到托盘
+- 配置单一来源：设置页改完写回 `.env`（`AppConfig::save_to_dotenv` 原子写 `.tmp`→rename），不引入 GUI 专属配置文件
+- 关闭窗口：`on_window_should_close` 返回 false + `window.minimize_window` 最小化到托盘
 
 ### 不做（已知 TODO）
 
@@ -102,7 +100,7 @@ cargo run --features cuda --features gui --bin lorag-gui
 
 ```bash
 cargo build --release --features cuda --features gui
-cargo install cargo-wix --locked    # 需要 WiX Toolset v3.14+ 在 PATH
+cargo install cargo-wix --locked # 需要 WiX Toolset v3.14+ 在 PATH
 cargo wix
 # 产物：target\wix\lorag-0.1.0-x86_64.msi
 ```

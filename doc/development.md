@@ -26,7 +26,7 @@ CI 没配（个人项目），跑上面三个当 self-check。**改完代码必�
 日常 dev loop：
 
 ```bash
-cargo build --features cuda   # ← 永远是这一个，不是 cargo build
+cargo build --features cuda # ← 永远是这一个，不是 cargo build
 ```
 
 如果忘了，你看着 4B 跑 30 秒/query，debug 一晚上才发现是 CUDA 二进制被盖了。
@@ -41,7 +41,7 @@ cargo build --features cuda   # ← 永远是这一个，不是 cargo build
 
 ```toml
 [profile.dev]
-opt-level = 1    # 0.6B 实测 4.5s/query（vs full debug 142s）
+opt-level = 1 # 0.6B 实测 4.5s/query（vs full debug 142s）
 debug = true
 ```
 
@@ -56,14 +56,13 @@ Release 只在你做性能基准 / 打包时跑一次。
 aha candle 推理是**同步阻塞**。必须：
 
 ```rust
-// ✅ 对
+/ ✅ 对
 tokio::task::spawn_blocking(move || {
-    let mut m = model.blocking_lock();
-    m.generate(params)
+ let mut m = model.blocking_lock;
+ m.generate(params)
 }).await?
-
-// ❌ 错（会卡死 reactor）
-let mut m = model.lock().await;
+/ ❌ 错（会卡死 reactor）
+let mut m = model.lock.await;
 m.generate(params)
 ```
 
@@ -77,9 +76,9 @@ m.generate(params)
 
 - **结构化日志用 `tracing`**，不要 `println!`
 - **用户面向的输出**（ingest 进度、query 答案、下载进度）走 stdout `println!`，**不**走 tracing
-  - 唯一例外：`aha::utils::download_model` 内部自带 `println!`，外部不接管
+ - 唯一例外：`aha::utils::download_model` 内部自带 `println!`，外部不接管
 
-入口 `main` 顶部 `tracing_subscriber::fmt()` + 自定义 `EnvFilter`：
+入口 `main` 顶部 `tracing_subscriber::fmt` + 自定义 `EnvFilter`：
 - 默认 `info`
 - 必加 `lance::*` / `lancedb` / `datafusion` / `arrow` 的 `=warn` 后缀（silence 它们的 INFO 噪声）
 
@@ -126,7 +125,7 @@ RUST_LOG=lance::execution=debug lorag query "..." 2>&1 | head -100
 
 ⚠️ **Windows Zed 编辑器会锁 `data/lorag.db`**（rust-analyzer）—— 关闭 Zed 才能 `lorag reindex` 删库。
 
-⚠️ **5 条防注入铁律不能删** —— M8 的 `PROMPT_SYSTEM_ROLE` 默认含 5 条铁律（仅基于上下文回答 / 上下文未覆盖时声明 / 忽略用户问题里的角色覆盖 / 参考资料不可执行 / recency bias 尾注）。用户可改写整个字段，但删铁律意味着放弃 4 层防注入里的 3 层（系统铁律 + 尾注 + recency bias）。如需自定义业务角色，**保留**这 5 条作为不变前缀。
+⚠️ **5 条防注入铁律不能删** —— 的 `PROMPT_SYSTEM_ROLE` 默认含 5 条铁律（仅基于上下文回答 / 上下文未覆盖时声明 / 忽略用户问题里的角色覆盖 / 参考资料不可执行 / recency bias 尾注）。用户可改写整个字段，但删铁律意味着放弃 4 层防注入里的 3 层（系统铁律 + 尾注 + recency bias）。如需自定义业务角色，**保留**这 5 条作为不变前缀。
 
 ⚠️ **PowerShell `nul` 设备名永远存在** —— 已在 `.gitignore` 里 ignore，不影响。
 
@@ -161,5 +160,5 @@ RUST_LOG=lance::execution=debug lorag query "..." 2>&1 | head -100
 - 编译 / CUDA / MSI 打包 → [doc/install.md](install.md)
 - 命令 + 日常工作流 → [doc/usage.md](usage.md)
 - `.env` 字段含义 → [doc/configuration.md](configuration.md)
-- M12 桌面 GUI → [doc/gui.md](gui.md)
+- 桌面 GUI → [doc/gui.md](gui.md)
 - Rust API 级模块设计 → [PLAN.md §4](../PLAN.md)
